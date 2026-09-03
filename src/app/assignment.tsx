@@ -27,9 +27,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AttachmentPreview, isImage } from '@/components/AttachmentPreview';
 import { showAlert, showError } from '@/components/Dialog';
+import { buildHandout, HandoutTooBig } from '@/lib/handoutShare';
 import { Icon } from '@/components/Icon';
 import { FooterSummary, Screen, StickyFooter, TopBar } from '@/components/layout';
-import { Button, Card, Overline, Press, SelectChip } from '@/components/ui';
+import { Button, Card, IconButton, Overline, Press, SelectChip } from '@/components/ui';
 import { fetchMessages, sendMessage as apiSendMessage } from '@/data/api';
 import { useGroups, useStore, useStudents } from '@/data/store';
 import { useT } from '@/i18n/useT';
@@ -105,6 +106,55 @@ export default function Assignment() {
       }
     } catch (e) {
       void showError(e);
+    }
+  };
+
+  /*
+    Sharing by QR, which needs none of what sending by email needs.
+
+    No addresses, no groups, no delivery report: the teacher holds the code up
+    and the room takes it. So this deliberately does not use `blocker`, which
+    is about who can be emailed — a class where nobody has an address on file
+    is exactly the class this is for. All it wants is something to hand over.
+
+    The files are uploaded the same way the email path uploads them, so a
+    teacher who does both pays for one upload.
+  */
+  const shareByQr = async () => {
+    if (busy) return;
+    if (!files.length && !instructions.trim()) {
+      void showAlert(t('handout.title'), t('handout.needSomething'));
+      return;
+    }
+    if (!hasSupabase && files.length) {
+      void showAlert(t('handout.title'), t('assign.emailOnly'));
+      return;
+    }
+
+    try {
+      setBusy(
+        files.length ? t('assign.uploading', { done: 0, total: files.length }) : t('handout.preparing'),
+      );
+      const { payload } = await buildHandout({
+        // Named after the classes it was set for, which is what a student
+        // scanning it needs to see at the top. Falls back to the app's word for
+        // an assignment when no group is ticked, since a QR handout does not
+        // require one.
+        title: selectedGroups.map((g) => g.name).join(', ') || t('assign.new'),
+        instructions,
+        teacherName: useStore.getState().teacherName,
+        files,
+        onProgress: (done, total) => setBusy(t('assign.uploading', { done, total })),
+      });
+
+      router.push({ pathname: '/handout', params: { data: payload } });
+    } catch (e) {
+      // A payload over the cap is not a failure the teacher can read a stack
+      // trace about; it is "that is too much to fit in a code".
+      if (e instanceof HandoutTooBig) void showAlert(t('handout.title'), t('handout.tooBig'));
+      else void showError(e, t('handout.title'));
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -279,7 +329,23 @@ export default function Assignment() {
             <Text style={styles.busyLabel}>{busy}</Text>
           </View>
         ) : (
-          <Button label={t('assign.send')} icon="send" onPress={send} disabled={!!blocker} />
+          <>
+            {/*
+              Its own control rather than a choice inside Send, because it is a
+              different act: Send needs email addresses and reaches whoever has
+              one, and this reaches whoever is in the room.
+            */}
+            <IconButton
+              name="qr"
+              onPress={() => void shareByQr()}
+              size={48}
+              iconSize={20}
+              tint={color.primaryTint}
+              fg={color.primary}
+              accessibilityLabel={t('handout.qr')}
+            />
+            <Button label={t('assign.send')} icon="send" onPress={send} disabled={!!blocker} />
+          </>
         )}
       </StickyFooter>
 

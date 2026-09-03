@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ClassCare</title>
+<!--
+  The page a scanned ClassCare handout opens.
+
+  Upload as `h/index.html` so it answers at https://api.smiletech.dev/h — the
+  URL `src/lib/handout.ts` builds its codes around.
+
+  The handout is in the URL *fragment*, which a browser never sends to the
+  server. So this page receives the assignment; the hosting never sees it, it
+  is not in any access log, and there is nothing here to secure. The page is
+  static and identical for every handout ever made.
+
+  Deliberately one file with nothing fetched from anywhere. It is opened on a
+  filtered connection by a student who wants a worksheet, and a stylesheet or a
+  font from a CDN is one more thing to be blocked between them and it.
+-->
+<style>
+  :root {
+    --ground: #f4f7fb; --card: #ffffff; --ink: #10151f; --soft: #46506a;
+    --muted: #7b869f; --line: #e2e8f2; --blue: #2457e8; --tint: #eaf0ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0c1017; --card: #151b26; --ink: #f2f5fa; --soft: #b9c2d4;
+      --muted: #7f8899; --line: #232b3a; --blue: #6f92ff; --tint: #1a2340;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 48px;
+    background: var(--ground); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 22px; }
+  .brand b { font-size: 17px; letter-spacing: -0.2px; }
+  .brand .c { color: var(--blue); } .brand .care { color: #00a551; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 18px; margin-bottom: 16px;
+  }
+  h1 { font-size: 19px; line-height: 1.3; margin: 0 0 4px; }
+  .from { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .body { white-space: pre-wrap; color: var(--soft); margin: 0; }
+  .label {
+    text-transform: uppercase; letter-spacing: 0.09em; font-size: 11px;
+    font-weight: 700; color: var(--muted); margin: 0 0 10px 2px;
+  }
+  a.file {
+    display: flex; align-items: center; gap: 12px; text-decoration: none;
+    color: inherit; padding: 13px 14px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--card); margin-bottom: 8px;
+  }
+  a.file:active { background: var(--tint); }
+  .glyph {
+    width: 38px; height: 38px; flex: none; border-radius: 10px;
+    background: var(--tint); color: var(--blue);
+    display: grid; place-items: center; font-size: 17px;
+  }
+  .fname { font-weight: 600; word-break: break-word; }
+  .fmeta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .note { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin-top: 18px; }
+  .bad { text-align: center; padding: 48px 20px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main id="app"><div class="bad" id="loading"></div></main>
+<script>
+(function () {
+  'use strict';
+
+  /* The three languages the app itself speaks, picked off the browser. */
+  var STRINGS = {
+    en: { files: 'Files', none: 'Instructions only, no files.', from: 'From ',
+          bad: 'This link does not contain a handout.',
+          old: 'This browser is too old to open it. Try Chrome or Safari.',
+          note: 'File links expire. If one does not open, ask your teacher to show the code again.' },
+    ru: { files: 'Файлы', none: 'Только пояснение, без файлов.', from: 'От ',
+          bad: 'В этой ссылке нет задания.',
+          old: 'Этот браузер слишком старый. Откройте в Chrome или Safari.',
+          note: 'Ссылки на файлы истекают. Если файл не открывается, попросите учителя показать код ещё раз.' },
+    tk: { files: 'Faýllar', none: 'Diňe düşündiriş, faýlsyz.', from: '',
+          bad: 'Bu salgyda tabşyryk ýok.',
+          old: 'Bu brauzer köne. Chrome ýa-da Safari-de açyň.',
+          note: 'Faýl salgylary möhleti gutarýar. Açylmasa, mugallymdan QR kody ýene görkezmegini soraň.' },
+  };
+  var nav = (navigator.language || 'en').slice(0, 2).toLowerCase();
+  var T = STRINGS[nav] || STRINGS.en;
+  document.documentElement.lang = STRINGS[nav] ? nav : 'en';
+  document.getElementById('loading').textContent = '…';
+
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+  /* The mirror of `toBase64url` in src/lib/handout.ts. */
+  function fromBase64url(text) {
+    var clean = text.replace(/[^A-Za-z0-9\-_]/g, '');
+    var out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+    var n = 0, acc = 0, bits = 0;
+    for (var i = 0; i < clean.length; i++) {
+      var v = B64.indexOf(clean.charAt(i));
+      if (v < 0) continue;
+      acc = (acc << 6) | v; bits += 6;
+      if (bits >= 8) { bits -= 8; out[n++] = (acc >> bits) & 255; }
+    }
+    return out.subarray(0, n);
+  }
+
+  /*
+    `deflate-raw`, not `deflate`.
+
+    fflate's `deflateSync` writes a bare DEFLATE stream with no zlib header, so
+    asking for 'deflate' here fails on every compressed handout — which is most
+    of them.
+  */
+  function inflate(bytes) {
+    if (typeof DecompressionStream === 'undefined') return Promise.reject(new Error('old'));
+    var ds = new DecompressionStream('deflate-raw');
+    var w = ds.writable.getWriter();
+    w.write(bytes); w.close();
+    return new Response(ds.readable).arrayBuffer().then(function (b) { return new Uint8Array(b); });
+  }
+
+  function bytesToString(u8) {
+    return new TextDecoder().decode(u8);
+  }
+
+  function parse(raw) {
+    var PREFIX = 'CCH1:';
+    if (raw.indexOf(PREFIX) !== 0) return Promise.reject(new Error('bad'));
+    var marked = raw.slice(PREFIX.length);
+    var how = marked.charAt(0);
+    var bytes = fromBase64url(marked.slice(1));
+    var json = how === 'z' ? inflate(bytes).then(bytesToString) : Promise.resolve(bytesToString(bytes));
+    return json.then(function (text) {
+      var h = JSON.parse(text);
+      if (!h || h.v !== 1 || !Array.isArray(h.f)) throw new Error('bad');
+      return h;
+    });
+  }
+
+  function bytesLabel(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return Math.round(n / 1024) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  var el = function (tag, cls, txt) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (txt != null) n.textContent = txt;   /* textContent, never innerHTML */
+    return n;
+  };
+
+  function fail(message) {
+    var app = document.getElementById('app');
+    app.textContent = '';
+    app.appendChild(el('div', 'bad', message));
+  }
+
+  function render(h) {
+    var app = document.getElementById('app');
+    app.textContent = '';
+
+    var brand = el('div', 'brand');
+    var mark = el('b');
+    mark.appendChild(el('span', 'c', 'Class'));
+    mark.appendChild(el('span', 'care', 'Care'));
+    brand.appendChild(mark);
+    app.appendChild(brand);
+
+    var card = el('div', 'card');
+    card.appendChild(el('h1', null, h.t || ''));
+    if (h.w) card.appendChild(el('p', 'from', T.from + h.w));
+    if (h.b) card.appendChild(el('p', 'body', h.b));
+    app.appendChild(card);
+
+    app.appendChild(el('p', 'label', T.files));
+    if (h.f.length) {
+      h.f.forEach(function (f) {
+        /*
+          Only http(s). The link comes off a camera, and `javascript:` in an
+          href is the one thing a page rendering scanned input must never pass
+          through.
+        */
+        if (!/^https?:\/\//i.test(f.u || '')) return;
+        var a = el('a', 'file');
+        a.href = f.u;
+        a.rel = 'noopener noreferrer';
+        a.appendChild(el('div', 'glyph', '⬇'));
+        var wrap = el('div');
+        wrap.appendChild(el('div', 'fname', f.n || 'file'));
+        wrap.appendChild(el('div', 'fmeta', bytesLabel(f.s || 0)));
+        a.appendChild(wrap);
+        app.appendChild(a);
+      });
+      app.appendChild(el('p', 'note', T.note));
+    } else {
+      var none = el('div', 'card');
+      none.appendChild(el('div', 'fmeta', T.none));
+      app.appendChild(none);
+    }
+  }
+
+  var raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  if (!raw) { fail(T.bad); return; }
+  parse(raw).then(render, function (e) { fail(e && e.message === 'old' ? T.old : T.bad); });
+
+  /* A second handout scanned into the same open tab. */
+  window.addEventListener('hashchange', function () {
+    var next = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+    if (next) parse(next).then(render, function () { fail(T.bad); });
+  });
+})();
+</script>
+</body>
+</html>

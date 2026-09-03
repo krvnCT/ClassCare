@@ -206,6 +206,24 @@ const GLYPHS = {
       [11.8, 3.4, 3.4, 11.8, 1],
     ],
   },
+  /*
+    A QR code, as a mark rather than as a code.
+
+    Three finder squares and a scatter of modules in the free corner, which is
+    the silhouette everyone reads as "scan this". The finders are drawn hollow:
+    at the 15-20px this renders at, an inner dot at 1.6 stroke merges into the
+    ring around it and the whole thing turns into a filled blob.
+  */
+  qr: {
+    box: 18,
+    sw: 1.6,
+    rects: [
+      [2.4, 2.4, 5, 5, 1.2],
+      [10.6, 2.4, 5, 5, 1.2],
+      [2.4, 10.6, 5, 5, 1.2],
+    ],
+    d: ['M10.6 10.6h2.2M15.6 10.6h0.01M10.6 15.6h0.01M13.4 13.4h2.2M15.6 15.6h0.01'],
+  },
   /** Settings. A gear, drawn as a ring with eight teeth. */
   gear: {
     box: 18,
