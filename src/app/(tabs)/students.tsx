@@ -23,8 +23,19 @@ import type { TranslationKey } from '@/i18n';
 import { callNumber, smsNumber } from '@/lib/contact';
 import { ageFrom, toKey } from '@/lib/date';
 import { levelOf } from '@/lib/courses';
-import { genderOf } from '@/lib/names';
 import { exportStudentsSheet, importStudentsSheet } from '@/lib/sheetFlow';
+import {
+  AGE_BANDS,
+  buildSections,
+  MISSING_FILTERS,
+  schoolKey,
+  schoolsOf,
+  type AgeBand,
+  type GenderFilter,
+  type MissingFilter,
+  type Section,
+  type SortMode,
+} from '@/lib/studentFilter';
 import { compareTerms, termLabel, termOf } from '@/lib/term';
 import { radius, space, useTheme, useThemedStyles, type AccentName, type Theme } from '@/theme';
 import { body, text } from '@/theme/type';
@@ -54,69 +65,6 @@ const HEADER_H = 36;
 const LIST_TOP = 14;
 /** Group tags on a row before the rest become a count. */
 const TAGS_SHOWN = 2;
-
-type GenderFilter = 'any' | Gender | 'none';
-type SortMode = 'name' | 'place' | 'school' | 'level' | 'score';
-
-/**
- * Students with a gap in their record.
- *
- * The one filter here that is not about finding a student — it is about finding
- * the *hole*. A teacher who cannot send a message to half a class needs the
- * list of who has no number on file, and until now the only way to get it was
- * to open sixty students one at a time.
- *
- * `parent` means neither guardian has a phone, not neither has a name. A name
- * with no number is no more use than nothing when the child is off sick.
- */
-type MissingFilter = 'any' | 'phone' | 'parent' | 'birthday' | 'school';
-
-const MISSING_FILTERS = [
-  { key: 'phone', labelKey: 'students.missingPhone' as TranslationKey },
-  { key: 'parent', labelKey: 'students.missingParent' as TranslationKey },
-  { key: 'birthday', labelKey: 'students.missingBirthday' as TranslationKey },
-  { key: 'school', labelKey: 'students.missingSchool' as TranslationKey },
-] as const;
-
-/**
- * Score bands, for the sort that groups by them.
- *
- * Out of ten, in twos, because that is the granularity a teacher actually acts
- * on. "Who is under five" is a question with a consequence; "who is on 6.4
- * against 6.7" is not.
- */
-const SCORE_BANDS = [
-  { key: '9', labelKey: 'students.scoreBand' as TranslationKey, params: { from: 9, to: 10 }, min: 9 },
-  { key: '7', labelKey: 'students.scoreBand' as TranslationKey, params: { from: 7, to: 8 }, min: 7 },
-  { key: '5', labelKey: 'students.scoreBand' as TranslationKey, params: { from: 5, to: 6 }, min: 5 },
-  { key: '0', labelKey: 'students.scoreUnder' as TranslationKey, params: { score: 5 }, min: 0 },
-] as const;
-
-/**
- * A school name as a bucket key.
- *
- * Case and spacing only. School names are typed by hand, once per student, so
- * "Mekdep 20", "mekdep 20" and " Mekdep  20 " are one school and have to land
- * in one chip — otherwise the filter offers three and each finds a third of
- * the children.
- */
-const schoolKey = (raw: string) => raw.trim().toLowerCase().replace(/\s+/g, ' ');
-
-/**
- * Age bands rather than a slider.
- *
- * A tutor thinks in school stages — the little ones, the exam years — not in
- * "students aged 11 to 14". Bands make the common questions one tap, and a
- * slider would make every one of them a fiddle.
- */
-const AGE_BANDS = [
-  { key: 'under10', labelKey: 'students.ageUnder' as TranslationKey, params: { age: 10 }, min: 0, max: 9 },
-  { key: '10to13', labelKey: 'students.ageBetween' as TranslationKey, params: { from: 10, to: 13 }, min: 10, max: 13 },
-  { key: '14to17', labelKey: 'students.ageBetween' as TranslationKey, params: { from: 14, to: 17 }, min: 14, max: 17 },
-  { key: '18plus', labelKey: 'students.ageOver' as TranslationKey, params: { age: 18 }, min: 18, max: 200 },
-] as const;
-
-type AgeBand = (typeof AGE_BANDS)[number]['key'] | 'any';
 
 export default function Students() {
   const t = useT();
@@ -235,31 +183,8 @@ export default function Students() {
     return out;
   }, [students, groups, termFor]);
 
-  /**
-   * Schools the teacher actually has, with the spelling they used most.
-   *
-   * Built from the data rather than a fixed list, the same as terms: a tutor's
-   * students come from four or five schools and nobody is going to maintain a
-   * table of them. The label shown is the commonest spelling of each key, so a
-   * school typed once with a stray capital does not decide how the chip reads.
-   */
-  const schools = useMemo(() => {
-    const spellings = new Map<string, Map<string, number>>();
-    for (const s of students) {
-      const raw = s.school?.trim();
-      if (!raw) continue;
-      const key = schoolKey(raw);
-      const counts = spellings.get(key) ?? new Map<string, number>();
-      counts.set(raw, (counts.get(raw) ?? 0) + 1);
-      spellings.set(key, counts);
-    }
-    return [...spellings.entries()]
-      .map(([key, counts]) => ({
-        key,
-        label: [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0],
-      }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  }, [students]);
+  /** Schools the teacher actually has. Shared with the sort — see `schoolsOf`. */
+  const schools = useMemo(() => schoolsOf(students), [students]);
 
   /**
    * Every student's level, computed once.
@@ -672,214 +597,6 @@ function FilterRow({ label, children }: { label: string; children: React.ReactNo
       </ScrollView>
     </View>
   );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Filtering, sorting, sectioning                                             */
-/* -------------------------------------------------------------------------- */
-
-type Section = { title: string; data: Student[] };
-
-/**
- * Where a student lives, as a heading.
- *
- * The first comma-separated part of the address, which is how people write
- * these — "Aşgabat, Görogly köçesi 12" is a city and a street, and the city is
- * the useful bucket. An address with no comma is its own heading, which for a
- * tutor whose students all live in one town is exactly right: the streets
- * become the groups.
- */
-const placeOf = (s: Student) => (s.address ?? '').split(',')[0]?.trim() ?? '';
-
-function buildSections({
-  students,
-  query,
-  gender,
-  term,
-  age,
-  school,
-  level,
-  missing,
-  sort,
-  termsByStudent,
-  levelByStudent,
-  t,
-}: {
-  students: Student[];
-  query: string;
-  gender: GenderFilter;
-  term: string;
-  age: AgeBand;
-  school: string;
-  level: string;
-  missing: MissingFilter;
-  sort: SortMode;
-  termsByStudent: Map<string, Set<string>>;
-  levelByStudent: Map<string, number>;
-  t: (key: TranslationKey, vars?: Record<string, string | number>) => string;
-}): Section[] {
-  const q = query.trim().toLowerCase();
-  const digits = q.replace(/\s/g, '');
-  const band = AGE_BANDS.find((b) => b.key === age);
-
-  const matches = students.filter((s) => {
-    if (q) {
-      // The school is searched too, so a teacher who remembers where a child
-      // goes but not how their surname is spelled can still find them — which
-      // is the commoner of the two by some way.
-      const hit =
-        s.name.toLowerCase().includes(q) ||
-        s.phone.replace(/\s/g, '').includes(digits) ||
-        (s.address ?? '').toLowerCase().includes(q) ||
-        (s.school ?? '').toLowerCase().includes(q);
-      if (!hit) return false;
-    }
-
-    /*
-      "Not recorded" is its own answer, not a third gender: it selects the
-      students whose gender nobody has filled in, which is the list a teacher
-      wants when they are trying to finish filling it in.
-
-      Read through `genderOf`, so a surname that says which counts as recorded.
-      Filtering on the stored column alone put every student entered before the
-      inference existed in the "not recorded" bucket, and left the male and
-      female filters returning only the handful saved since.
-    */
-    const known = genderOf(s);
-    if (gender === 'none' ? !!known : gender !== 'any' && known !== gender) return false;
-
-    if (term !== 'any' && !termsByStudent.get(s.id)?.has(term)) return false;
-
-    if (school !== 'any') {
-      const key = s.school?.trim() ? schoolKey(s.school) : '';
-      // `none` is the students with no school on file, the same shape of answer
-      // as "not recorded" on gender and for the same reason.
-      if (school === 'none' ? key !== '' : key !== school) return false;
-    }
-
-    if (level !== 'any' && String(levelByStudent.get(s.id) ?? 0) !== level) return false;
-
-    if (missing !== 'any' && !isMissing(s, missing)) return false;
-
-    if (band) {
-      // No birth date means no age, and a student with no age cannot be in a
-      // band. Silently including them would put ten-year-olds in the 18+ list.
-      if (!s.birthDate) return false;
-      const years = ageFrom(s.birthDate);
-      if (years < band.min || years > band.max) return false;
-    }
-
-    return true;
-  });
-
-  if (sort === 'place') {
-    return bucketed(matches, (s) => placeOf(s), t('students.noPlace'));
-  }
-
-  if (sort === 'school') {
-    return bucketed(matches, (s) => s.school?.trim() ?? '', t('students.noSchool'));
-  }
-
-  if (sort === 'level') {
-    /*
-      Numeric order, not the alphabetical order `bucketed` would give — which
-      puts level 10 between 1 and 2. Low to high, so the headings read as a
-      progression a teacher can scan down.
-    */
-    const sorted = [...matches].sort(
-      (a, b) =>
-        (levelByStudent.get(a.id) ?? 0) - (levelByStudent.get(b.id) ?? 0) ||
-        a.name.localeCompare(b.name),
-    );
-    const buckets = new Map<number, Student[]>();
-    for (const s of sorted) {
-      const n = levelByStudent.get(s.id) ?? 0;
-      buckets.set(n, [...(buckets.get(n) ?? []), s]);
-    }
-    return [...buckets.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([n, data]) => ({ title: t('students.levelN', { level: n }), data }));
-  }
-
-  if (sort === 'score') {
-    /*
-      Best first, and banded rather than one long ordered list: the question
-      behind this sort is "who is struggling", and a heading a teacher can stop
-      at answers it faster than a position in a ranking.
-    */
-    const scored = matches.filter((s) => typeof s.avgScore === 'number');
-    const unscored = matches.filter((s) => typeof s.avgScore !== 'number');
-    const buckets = new Map<string, Student[]>();
-
-    for (const s of [...scored].sort((a, b) => (b.avgScore ?? 0) - (a.avgScore ?? 0) || a.name.localeCompare(b.name))) {
-      const hit = SCORE_BANDS.find((b) => (s.avgScore ?? 0) >= b.min) ?? SCORE_BANDS[SCORE_BANDS.length - 1];
-      buckets.set(hit.key, [...(buckets.get(hit.key) ?? []), s]);
-    }
-
-    const sections = SCORE_BANDS.filter((b) => buckets.has(b.key)).map((b) => ({
-      title: t(b.labelKey, b.params),
-      data: buckets.get(b.key)!,
-    }));
-    // Students with no score at the end rather than at zero. A student nobody
-    // has graded is not a student doing badly, and putting them in the bottom
-    // band says the opposite.
-    if (unscored.length) {
-      sections.push({
-        title: t('students.noScore'),
-        data: [...unscored].sort((a, b) => a.name.localeCompare(b.name)),
-      });
-    }
-    return sections;
-  }
-
-  const buckets = new Map<string, Student[]>();
-  for (const s of [...matches].sort((a, b) => a.name.localeCompare(b.name))) {
-    const letter = s.name[0]?.toUpperCase() ?? '#';
-    const list = buckets.get(letter) ?? [];
-    list.push(s);
-    buckets.set(letter, list);
-  }
-  return [...buckets.entries()].map(([title, data]) => ({ title, data }));
-}
-
-/** Whether this student has the gap the filter is looking for. */
-function isMissing(s: Student, what: Exclude<MissingFilter, 'any'>): boolean {
-  switch (what) {
-    case 'phone':
-      return !s.phone.trim();
-    case 'parent':
-      // Phones, not names. A guardian's name with no number is no more use than
-      // nothing at all when a child is off sick.
-      return !s.parentPhone?.trim() && !s.parent2Phone?.trim();
-    case 'birthday':
-      return !s.birthDate;
-    case 'school':
-      return !s.school?.trim();
-  }
-}
-
-/**
- * Group students under a text heading, with the blanks collected at the end.
- *
- * Shared by the place and school sorts, which are the same operation over
- * different fields. Students with nothing recorded go under one heading last
- * rather than under "#", so the teacher can see at a glance how many are
- * missing it — which is usually why they reached for this sort.
- */
-function bucketed(students: Student[], keyOf: (s: Student) => string, blank: string): Section[] {
-  const buckets = new Map<string, Student[]>();
-  const sorted = [...students].sort(
-    (a, b) => keyOf(a).localeCompare(keyOf(b)) || a.name.localeCompare(b.name),
-  );
-  for (const s of sorted) {
-    const key = keyOf(s) || blank;
-    buckets.set(key, [...(buckets.get(key) ?? []), s]);
-  }
-  const entries = [...buckets.entries()];
-  return [
-    ...entries.filter(([k]) => k !== blank),
-    ...entries.filter(([k]) => k === blank),
-  ].map(([title, data]) => ({ title, data }));
 }
 
 /**
