@@ -34,6 +34,7 @@
  * still renders correctly rather than arriving with the brace intact.
  */
 import type { Student } from '@/data/types';
+import type { TranslationKey } from '@/i18n';
 import { translateNow } from '@/i18n/useT';
 import { fromKey, fullDate } from '@/lib/date';
 import { genderOf } from '@/lib/names';
@@ -50,6 +51,30 @@ export const PLACEHOLDERS = [
   '{birthdate}',
   '{missed_classes}',
 ] as const;
+
+export type Placeholder = (typeof PLACEHOLDERS)[number];
+
+/**
+ * What each chip says it does, under the row that inserts it.
+ *
+ * A `Record` over the placeholder union rather than a loose object: adding a
+ * placeholder without a line explaining it stops compiling, which is the only
+ * way this list stays honest. Braces on their own are not self-explanatory —
+ * `{gender}` in particular renders `gyzyňyz`, not "female", and a teacher who
+ * has to send one message to find that out has already sent it to thirty
+ * parents.
+ */
+export const PLACEHOLDER_HINTS: Record<Placeholder, TranslationKey> = {
+  '{name}': 'msgvar.hint.name',
+  '{group}': 'msgvar.hint.group',
+  '{time}': 'msgvar.hint.time',
+  '{gender}': 'msgvar.hint.gender',
+  '{parent_name}': 'msgvar.hint.parentName',
+  '{phone}': 'msgvar.hint.phone',
+  '{address}': 'msgvar.hint.address',
+  '{birthdate}': 'msgvar.hint.birthdate',
+  '{missed_classes}': 'msgvar.hint.missedClasses',
+};
 
 export type MessageVars = {
   /** The student's name, even in a message to a parent. */

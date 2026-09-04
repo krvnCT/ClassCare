@@ -35,6 +35,7 @@ import {
   GRADE_PLACEHOLDERS,
   previewGradeTemplate,
 } from '@/lib/gradeTemplate';
+import { PLACEHOLDER_HINTS, PLACEHOLDERS } from '@/lib/messageVars';
 import { builtInDefault, builtInTemplates } from '@/lib/templates';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body } from '@/theme/type';
@@ -342,8 +343,12 @@ export default function Templates() {
                 selectionColor={color.primary}
                 keyboardAppearance={scheme === 'dark' ? 'dark' : 'light'}
               />
+              {/* Every placeholder the composer fills, not the three this
+                  screen used to offer. A template written here is sent from
+                  there, so a chip missing here is a variable the teacher had to
+                  know existed and type by hand. */}
               <View style={styles.chipRow}>
-                {['{name}', '{group}', '{time}'].map((p) => (
+                {PLACEHOLDERS.map((p) => (
                   <Press
                     key={p}
                     onPress={() => setText((d) => `${d}${d.endsWith(' ') || !d ? '' : ' '}${p}`)}
@@ -355,6 +360,15 @@ export default function Templates() {
             </Card>
 
             <Text style={styles.hint}>{t('messages.placeholderHint')}</Text>
+
+            <Card style={styles.legend}>
+              {PLACEHOLDERS.map((p) => (
+                <View key={p} style={styles.legendRow}>
+                  <Text style={styles.legendKey}>{p}</Text>
+                  <Text style={styles.legendText}>{t(PLACEHOLDER_HINTS[p])}</Text>
+                </View>
+              ))}
+            </Card>
 
             {editingBuiltIn ? (
               <Press onPress={() => void resetBuiltIn()} style={styles.resetRow}>
@@ -543,6 +557,22 @@ const makeStyles = ({ color }: Theme) =>
       color: color.ink,
     },
     chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 12 },
+    legend: { marginTop: 12, paddingVertical: 6 },
+    legendRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 10,
+      paddingVertical: 6,
+    },
+    /* Fixed width so the braces line up as a column and the sentences start
+       together — a ragged left edge on nine rows is hard to read down. */
+    legendKey: {
+      fontFamily: body[600],
+      fontSize: 12,
+      color: color.inkSoft,
+      width: 124,
+    },
+    legendText: { flex: 1, fontFamily: body[400], fontSize: 12, color: color.mutedLight },
     chip: {
       paddingHorizontal: 10,
       paddingVertical: 6,
