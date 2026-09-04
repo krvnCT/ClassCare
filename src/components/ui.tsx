@@ -2,6 +2,7 @@ import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { forwardRef, type ReactNode } from 'react';
 import {
+  ActivityIndicator,
   Platform,
   Pressable,
   type PressableProps,
@@ -117,6 +118,8 @@ type ButtonProps = {
   /** solid = primary blue, tonal = white on tint, ghost = borderless. */
   variant?: 'solid' | 'outline' | 'tonal' | 'ghost' | 'success';
   disabled?: boolean;
+  /** Working. Shows a spinner in place of the icon and blocks further taps. */
+  busy?: boolean;
   height?: number;
   style?: ViewStyle;
   /** Fill the row rather than hugging its label. */
@@ -139,6 +142,7 @@ export function Button({
   onPress,
   variant = 'solid',
   disabled,
+  busy,
   height = 48,
   grow,
   style,
@@ -146,12 +150,13 @@ export function Button({
   const { color } = useTheme();
   const styles = useThemedStyles(makeStyles);
   const skin = buttonSkins(color)[variant];
-  const bg = disabled && variant === 'solid' ? color.borderStrong : skin.bg;
+  const off = disabled || busy;
+  const bg = off && variant === 'solid' ? color.borderStrong : skin.bg;
 
   return (
     <Press
       onPress={onPress}
-      disabled={disabled}
+      disabled={off}
       style={[
         styles.button,
         {
@@ -163,7 +168,17 @@ export function Button({
         grow ? { flex: 1 } : null,
         style as ViewStyle,
       ]}>
-      {icon ? <Icon name={icon} size={16} color={skin.fg} /> : null}
+      {/*
+        The spinner replaces the icon rather than the label. Swapping the label
+        out changes the button's width mid-press, which on a footer of two
+        buttons makes the other one jump — and the teacher needs to keep reading
+        what they just asked for while they wait for it.
+      */}
+      {busy ? (
+        <ActivityIndicator size="small" color={skin.fg} />
+      ) : icon ? (
+        <Icon name={icon} size={16} color={skin.fg} />
+      ) : null}
       <Text style={[text.button, { color: skin.fg }]}>{label}</Text>
     </Press>
   );

@@ -22,6 +22,22 @@ export type SyncState = {
   /** A push or pull is in flight right now. Drives the spinner on the button. */
   syncing: boolean;
   /**
+   * The very first pull on this device is running, and there is nothing local
+   * behind it yet.
+   *
+   * Distinct from `syncing`, which is true of every later refresh and is meant
+   * to be ignorable. This one earns the whole screen: a teacher signing in on a
+   * new phone waits while a term of students, groups, registers and marks comes
+   * down, and what they used to see meanwhile was an empty roster — which reads
+   * exactly like an account with nothing in it. More than one has concluded
+   * their data was lost and begun typing it back in.
+   *
+   * Cleared when the pull finishes, succeeds or fails. A failure leaves them on
+   * the empty roster with the sync banner, which is at least honest; leaving
+   * the spinner up forever would not be.
+   */
+  firstPull: boolean;
+  /**
    * When something last reached the server, as `Date.now()`.
    *
    * Not persisted, like everything else here. "Last synced 3 days ago" after a
@@ -40,6 +56,7 @@ export const useSyncStatus = create<SyncStore>()((set) => ({
   offline: false,
   failure: null,
   syncing: false,
+  firstPull: false,
   lastSyncedAt: null,
   report: (patch) => set(patch),
   clearFailure: () => set({ failure: null }),

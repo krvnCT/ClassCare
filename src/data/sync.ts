@@ -854,6 +854,31 @@ async function canPull(): Promise<boolean> {
 export async function hydrate() {
   if (!(await canPull())) return;
 
+  /*
+    Whether this is the pull the teacher is *waiting* on.
+
+    Nothing local means a fresh install or a new phone, and everything they own
+    is about to arrive over a connection that may be slow. That case gets the
+    whole screen — see `FullScreenBusy`. Every later hydrate has a roster behind
+    it and gets the pill instead, because interrupting a lesson to announce a
+    background refresh is worse than saying nothing.
+
+    Read before the pull and cleared in `finally`, so a failure returns the
+    teacher to an empty roster and the sync banner rather than to a spinner
+    that never stops.
+  */
+  const empty =
+    useStore.getState().students.length === 0 && useStore.getState().groups.length === 0;
+  if (empty) useSyncStatus.getState().report({ firstPull: true });
+
+  try {
+    return await pull();
+  } finally {
+    if (empty) useSyncStatus.getState().report({ firstPull: false });
+  }
+}
+
+async function pull() {
   if (queue.length) {
     const drained = await flushWrites();
     if (!drained) return;

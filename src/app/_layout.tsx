@@ -16,16 +16,18 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
 import { useEffect, useState } from 'react';
-import { AppState, Linking } from 'react-native';
+import { AppState, Linking, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { BusyHost, FullScreenBusy } from '@/components/Busy';
 import { DialogHost } from '@/components/Dialog';
 import { Intro } from '@/components/Intro';
 import { SyncBanner } from '@/components/SyncBanner';
 import { updateTeacher } from '@/data/api';
 import { loadLocal, startPersistence, wipeLocal } from '@/data/persistence';
 import { useGroups, useStore } from '@/data/store';
+import { useSyncStatus } from '@/data/syncStatus';
 import { toKey } from '@/lib/date';
 import { importFromUri, looksLikeBackupUrl, takeHeldImport } from '@/lib/importFlow';
 import {
@@ -445,6 +447,16 @@ function RootNavigator() {
       */}
       <SyncBanner />
       <DialogHost />
+      <BusyHost />
+
+      {/*
+        Over the navigator, not instead of it.
+
+        The tabs mount behind this and finish their first render while the pull
+        runs, so when it clears the teacher is looking at a populated roster
+        rather than at a screen that then has to build itself.
+      */}
+      <FirstPullGate />
 
       {/*
         Last, so it paints over everything while the first screen mounts behind
@@ -453,6 +465,25 @@ function RootNavigator() {
       */}
       {!introDone ? <Intro onDone={() => setIntroDone(true)} /> : null}
     </>
+  );
+}
+
+/**
+ * The whole screen while the account comes down for the first time.
+ *
+ * Only ever shown when there was nothing local to show instead — see
+ * `firstPull` in `syncStatus`. Every later refresh is a background matter and
+ * gets the pill on the home screen, because a teacher halfway through taking a
+ * register does not want the app to seize up to tell them it is checking for
+ * news.
+ */
+function FirstPullGate() {
+  const firstPull = useSyncStatus((s) => s.firstPull);
+  if (!firstPull) return null;
+  return (
+    <View style={StyleSheet.absoluteFill}>
+      <FullScreenBusy />
+    </View>
   );
 }
 

@@ -14,6 +14,7 @@
  */
 import { File } from 'expo-file-system';
 
+import { busyWhile } from '@/components/Busy';
 import { showAlert, showDialog, showError } from '@/components/Dialog';
 import {
   applyBackup,
@@ -129,30 +130,41 @@ export async function importFromFile(file: File): Promise<void> {
       protected by that account's row-level security. Rewriting them here is
       what stops the import from being refused row by row — see `reownBackup`.
     */
-    const owned = await reownBackup(backup);
-
     /*
-      What replacing is about to get rid of.
+      All of it behind one overlay.
 
-      Read before anything is applied, and only used on the replace branch: the
-      rows this account holds that the file does not, which have to go from the
-      server as well or the next sync hands them straight back.
+      Re-owning ids walks every row in the file, and applying a backup rewrites
+      the whole local database — on a full account that is the longest wait the
+      app has that is not a network call, and it must not be interrupted
+      halfway. The overlay also swallows the second tap, which used to start a
+      concurrent import over the top of the first.
     */
-    const before = choice === 'replace' ? survivors(owned.ids) : null;
+    await busyWhile(t('backup.restoring'), async () => {
+      const owned = await reownBackup(backup);
 
-    if (choice === 'merge') await mergeBackup(owned.backup);
-    else await applyBackup(owned.backup);
+      /*
+        What replacing is about to get rid of.
 
-    if (before) pushReplaced(before);
+        Read before anything is applied, and only used on the replace branch:
+        the rows this account holds that the file does not, which have to go
+        from the server as well or the next sync hands them straight back.
+      */
+      const before = choice === 'replace' ? survivors(owned.ids) : null;
 
-    /*
-      And up to the server.
+      if (choice === 'merge') await mergeBackup(owned.backup);
+      else await applyBackup(owned.backup);
 
-      An import that only lands locally is undone by the next sync: `hydrate`
-      pulls the account's rows over the top and the imported classes disappear,
-      minutes after the app said the import had worked.
-    */
-    pushImported(owned.ids);
+      if (before) pushReplaced(before);
+
+      /*
+        And up to the server.
+
+        An import that only lands locally is undone by the next sync: `hydrate`
+        pulls the account's rows over the top and the imported classes
+        disappear, minutes after the app said the import had worked.
+      */
+      pushImported(owned.ids);
+    });
 
     await showAlert(
       t('backup.imported'),

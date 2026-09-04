@@ -12,6 +12,7 @@
  */
 import { File } from 'expo-file-system';
 
+import { busyWhile } from '@/components/Busy';
 import { showAlert, showDialog, showError } from '@/components/Dialog';
 import { useStore } from '@/data/store';
 import {
@@ -88,10 +89,15 @@ export async function exportStudentsSheet(): Promise<void> {
   try {
     const { students, groups } = useStore.getState();
     const stamp = new Date().toISOString().slice(0, 10);
-    await writeAndShare(
-      `ClassCare-students-${stamp}.xlsx`,
-      studentsToXlsx(students, groups),
-      'csv.exported',
+    // Building a workbook is zipping a document, synchronously, on the UI
+    // thread. On a roster of sixty that is long enough for the tap to look
+    // ignored — and the share sheet then appears seconds later, from nowhere.
+    await busyWhile(t('csv.exporting'), () =>
+      writeAndShare(
+        `ClassCare-students-${stamp}.xlsx`,
+        studentsToXlsx(students, groups),
+        'csv.exported',
+      ),
     );
   } catch (e) {
     showError(e, t('csv.failedTitle'));
@@ -101,7 +107,9 @@ export async function exportStudentsSheet(): Promise<void> {
 /** The sample workbook, for a teacher starting from nothing. */
 export async function shareSheetTemplate(): Promise<void> {
   try {
-    await writeAndShare('ClassCare-template.xlsx', sampleStudentsXlsx(), 'csv.template');
+    await busyWhile(t('csv.exporting'), () =>
+      writeAndShare('ClassCare-template.xlsx', sampleStudentsXlsx(), 'csv.template'),
+    );
   } catch (e) {
     showError(e, t('csv.failedTitle'));
   }
@@ -145,9 +153,19 @@ export async function importStudentsSheet(): Promise<void> {
     ]);
     if (picked.canceled) return;
 
-    // Bytes rather than text: a workbook is a zip, and decoding one as UTF-8
-    // to hand back a string would corrupt it before anything could read it.
-    const parsed = studentsFromRows(rowsFromFile(await picked.result.bytes()));
+    /*
+      Behind an overlay, because unzipping a workbook and walking its rows is
+      synchronous and blocks the UI thread. A teacher importing sixty students
+      on an old phone got a screen that ignored them for a second or two, which
+      is indistinguishable from a tap that did not register — and the usual
+      response is to tap again.
+
+      Bytes rather than text: a workbook is a zip, and decoding one as UTF-8 to
+      hand back a string would corrupt it before anything could read it.
+    */
+    const parsed = await busyWhile(t('csv.reading'), async () =>
+      studentsFromRows(rowsFromFile(await picked.result.bytes())),
+    );
 
     const choice = await showDialog({
       title: t('csv.importTitle'),
@@ -161,7 +179,12 @@ export async function importStudentsSheet(): Promise<void> {
     });
     if (choice !== 'merge' && choice !== 'replace') return;
 
-    const outcome = await applyStudentSheet(parsed, choice);
+    // The writes themselves. A replace rewrites every student and every group
+    // membership, which on a full roster is the longest wait in the app that
+    // is not a network call.
+    const outcome = await busyWhile(t('csv.saving'), () =>
+      applyStudentSheet(parsed, choice),
+    );
 
     const lines = [
       choice === 'replace'

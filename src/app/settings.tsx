@@ -24,6 +24,7 @@ import { Screen, TopBar } from '@/components/layout';
 import { ActionRow } from '@/components/SettingsRows';
 import { Card, Divider, Overline, Press, Toggle } from '@/components/ui';
 import { updateTeacher } from '@/data/api';
+import { busyWhile } from '@/components/Busy';
 import { exportBackup } from '@/data/backup';
 import { useGroups, useStore } from '@/data/store';
 import { hydrate } from '@/data/sync';
@@ -80,7 +81,11 @@ export default function Settings() {
     if (busyBackup) return;
     setBusyBackup('export');
     try {
-      const file = await exportBackup();
+      // Serialising the whole account and writing it out. The row's label
+      // already changes, but a label is easy to miss on a screen of rows that
+      // all look alike, and this is long enough on a full account to be tapped
+      // twice.
+      const file = await busyWhile(t('backup.exporting'), () => exportBackup());
 
       /*
         Loaded here rather than imported at the top of the file.
