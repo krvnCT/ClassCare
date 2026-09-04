@@ -286,6 +286,60 @@ function decodePayload(text) {
   return JSON.parse(json.toString('utf8'));
 }
 
+/* --------------------------------------------------------------- QR code */
+
+/**
+ * Print a scannable QR in the terminal.
+ *
+ * Without this, `serve` hands you a 300-character payload and no way to get it
+ * into a phone — which makes the whole student-side test theoretical.
+ *
+ * Half blocks, so one character cell carries two rows of the code. A terminal
+ * cell is about twice as tall as it is wide, so one module per column and two
+ * per row comes out roughly square, which is what a scanner needs. Printing one
+ * module per cell instead would make the code twice as wide as it is tall and
+ * most scanners would refuse it — and at a hundred modules it would not fit on
+ * the screen either.
+ *
+ * Colours are set explicitly rather than relying on block characters alone. A
+ * block glyph is drawn in the foreground colour, so on a dark terminal theme
+ * the "dark" modules come out light and the code is inverted; naming both
+ * colours makes it correct on any theme.
+ */
+function printQr(text) {
+  const qrcode = require('qrcode-generator');
+  const qr = qrcode(0, 'M');
+  qr.addData(text, 'Byte');
+  qr.make();
+
+  const n = qr.getModuleCount();
+  const QUIET = 2;
+  const size = n + QUIET * 2;
+  // Outside the code proper is quiet zone, which must read as light.
+  const dark = (r, c) =>
+    r >= QUIET && r < QUIET + n && c >= QUIET && c < QUIET + n && qr.isDark(r - QUIET, c - QUIET);
+
+  const columns = process.stdout.columns || 80;
+  if (size > columns) {
+    console.log(`(the code is ${size} columns wide and the terminal is ${columns} —`);
+    console.log(` widen it, or zoom out, or the code will wrap and not scan)\n`);
+  }
+
+  for (let r = 0; r < size; r += 2) {
+    let line = '';
+    for (let c = 0; c < size; c++) {
+      const top = dark(r, c);
+      // An odd number of rows leaves the last cell's bottom half off the code,
+      // which is quiet zone and therefore light.
+      const bottom = r + 1 < size ? dark(r + 1, c) : false;
+      const fg = top ? 30 : 37;
+      const bg = bottom ? 40 : 47;
+      line += `\x1b[${fg};${bg}m\u2580`;
+    }
+    console.log(line + '\x1b[0m');
+  }
+}
+
 /* ------------------------------------------------------------- Self test */
 
 async function selftest() {
@@ -396,17 +450,28 @@ async function main() {
       .filter((n) => n && n.family === 'IPv4' && !n.internal)
       .map((n) => n.address);
 
-    console.log(`listening on port ${port}`);
-    console.log(`addresses: ${addresses.join(', ') || 'none — is wifi on?'}\n`);
-    for (const host of addresses) {
-      console.log(`payload for ${host}:`);
-      console.log(encodePayload({ ...manifest, h: host, o: port, k: token }));
-      console.log();
+    if (!addresses.length) {
+      console.error('No network address — is wifi on? The phone has to be able to reach this laptop.');
+      process.exitCode = 1;
+      return;
     }
-    console.log('Turn one of those into a QR (any generator, or an online one)');
-    console.log('and scan it with StudentCare. No SSID in it, so the app skips');
-    console.log('the Wi-Fi join and goes straight to this socket — put the phone');
-    console.log('on the same network as this laptop.');
+
+    // The first address is the usual answer; the rest are printed so a laptop
+    // on two networks (wifi and a dock, say) can be pointed at the right one.
+    const host = process.env.BEAM_HOST || addresses[0];
+    const payload = encodePayload({ ...manifest, h: host, o: port, k: token });
+
+    console.log(`serving ${manifest.f.length} file(s) on ${host}:${port}\n`);
+    printQr(payload);
+    console.log(`\nScan that with StudentCare. ${payload.length} bytes.\n`);
+    if (addresses.length > 1) {
+      console.log(`Other addresses on this laptop: ${addresses.slice(1).join(', ')}`);
+      console.log('If the scan connects but nothing arrives, re-run with');
+      console.log(`  BEAM_HOST=${addresses[1]} node tools/beam.js serve ...\n`);
+    }
+    console.log('The payload carries no wifi name, so the app skips the join and');
+    console.log('goes straight to this socket — put the phone on the same network');
+    console.log('as this laptop. Ctrl-C when done.');
     return;
   }
 
@@ -418,6 +483,12 @@ async function main() {
       console.log(`\njoin wifi "${decoded.n}" password "${decoded.q}"`);
       console.log(`then: node tools/beam.js pull ${decoded.h} ${decoded.o} ${decoded.k}`);
     }
+    return;
+  }
+
+  if (cmd === 'qr') {
+    if (!rest.length) return usage();
+    printQr(rest.join(' '));
     return;
   }
 
@@ -438,8 +509,11 @@ function usage() {
       Wi-Fi Direct group first — 'read' prints the name and password.
 
   node tools/beam.js serve <file...>
-      Act as a teacher for a real StudentCare. Prints a payload to
-      turn into a QR. Put the phone on this laptop's network.
+      Act as a teacher for a real StudentCare. Prints a scannable QR.
+      Put the phone on this laptop's network.
+
+  node tools/beam.js qr <text>
+      Print any text as a QR in the terminal.
 `);
   process.exitCode = 1;
 }
