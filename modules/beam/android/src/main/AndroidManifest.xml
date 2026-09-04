@@ -1,0 +1,35 @@
+<!--
+  Declared here rather than in app.json so the permissions travel with the code
+  that needs them — and because two of them carry attributes app.json's plain
+  string list cannot express.
+
+  `maxSdkVersion` on the location permission is the important one. Wi-Fi Direct
+  used to be gated behind location because a scan reveals where you are; from
+  Android 13 that job moved to NEARBY_WIFI_DEVICES, which is narrower and, with
+  `neverForLocation`, promises the platform we are not deriving a position from
+  it. Asking a teacher on Android 13 for their location in order to hand out a
+  worksheet is a permission prompt that gets refused, and rightly.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+  <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.INTERNET" />
+
+  <uses-permission
+    android:name="android.permission.NEARBY_WIFI_DEVICES"
+    android:usesPermissionFlags="neverForLocation"
+    tools:targetApi="tiramisu" />
+
+  <uses-permission
+    android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="32" />
+
+  <!--
+    Not required: the app must still install on a tablet with no Wi-Fi Direct
+    radio. `isAvailable()` reports false there and the UI hides the button.
+  -->
+  <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+</manifest>

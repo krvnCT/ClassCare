@@ -27,7 +27,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AttachmentPreview, isImage } from '@/components/AttachmentPreview';
 import { showAlert, showError } from '@/components/Dialog';
-import { buildHandout, HandoutTooBig } from '@/lib/handoutShare';
 import { Icon } from '@/components/Icon';
 import { FooterSummary, Screen, StickyFooter, TopBar } from '@/components/layout';
 import { Button, Card, IconButton, Overline, Press, SelectChip } from '@/components/ui';
@@ -110,52 +109,48 @@ export default function Assignment() {
   };
 
   /*
-    Sharing by QR, which needs none of what sending by email needs.
+    Sharing by QR, which needs none of what sending by email needs — and, since
+    it stopped being a link, needs no internet either.
 
-    No addresses, no groups, no delivery report: the teacher holds the code up
-    and the room takes it. So this deliberately does not use `blocker`, which
-    is about who can be emailed — a class where nobody has an address on file
-    is exactly the class this is for. All it wants is something to hand over.
+    Nothing is uploaded here. The teacher's phone becomes the server: it starts
+    a Wi-Fi group and serves the picked files straight off disk, and the QR on
+    the next screen carries the network details rather than an address. So this
+    screen's job is only to hand the assignment over intact.
 
-    The files are uploaded the same way the email path uploads them, so a
-    teacher who does both pays for one upload.
+    Deliberately not gated on `blocker`, which is about who can be emailed. A
+    class where nobody has an address on file is exactly the class this is for.
+    All it wants is something to hand over.
   */
-  const shareByQr = async () => {
+  const shareByQr = () => {
     if (busy) return;
     if (!files.length && !instructions.trim()) {
-      void showAlert(t('handout.title'), t('handout.needSomething'));
-      return;
-    }
-    if (!hasSupabase && files.length) {
-      void showAlert(t('handout.title'), t('assign.emailOnly'));
+      void showAlert(t('beam.title'), t('beam.needSomething'));
       return;
     }
 
-    try {
-      setBusy(
-        files.length ? t('assign.uploading', { done: 0, total: files.length }) : t('handout.preparing'),
-      );
-      const { payload } = await buildHandout({
+    router.push({
+      pathname: '/handout',
+      params: {
         // Named after the classes it was set for, which is what a student
-        // scanning it needs to see at the top. Falls back to the app's word for
-        // an assignment when no group is ticked, since a QR handout does not
-        // require one.
+        // scanning it sees at the top. Falls back to the app's word for an
+        // assignment when no group is ticked, since a handout needs no group.
         title: selectedGroups.map((g) => g.name).join(', ') || t('assign.new'),
         instructions,
-        teacherName: useStore.getState().teacherName,
-        files,
-        onProgress: (done, total) => setBusy(t('assign.uploading', { done, total })),
-      });
-
-      router.push({ pathname: '/handout', params: { data: payload } });
-    } catch (e) {
-      // A payload over the cap is not a failure the teacher can read a stack
-      // trace about; it is "that is too much to fit in a code".
-      if (e instanceof HandoutTooBig) void showAlert(t('handout.title'), t('handout.tooBig'));
-      else void showError(e, t('handout.title'));
-    } finally {
-      setBusy(null);
-    }
+        teacher: useStore.getState().teacherName,
+        // The picker's own URIs, passed through rather than copied. On Android
+        // these are `content://` handles from the Storage Access Framework and
+        // the grant rides on them, which is why they are not rebuilt from a
+        // path — see the note on `PickedAttachment.file`.
+        files: JSON.stringify(
+          files.map((f) => ({
+            uri: f.file.uri,
+            name: f.filename,
+            mime: f.mimeType,
+            size: f.size,
+          })),
+        ),
+      },
+    });
   };
 
   const send = async () => {
@@ -337,12 +332,12 @@ export default function Assignment() {
             */}
             <IconButton
               name="qr"
-              onPress={() => void shareByQr()}
+              onPress={shareByQr}
               size={48}
               iconSize={20}
               tint={color.primaryTint}
               fg={color.primary}
-              accessibilityLabel={t('handout.qr')}
+              accessibilityLabel={t('beam.qr')}
             />
             <Button label={t('assign.send')} icon="send" onPress={send} disabled={!!blocker} />
           </>

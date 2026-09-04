@@ -1,125 +1,246 @@
 /**
- * The QR a teacher holds up in front of the class.
+ * The QR a teacher holds up in front of the class, and the phone that serves
+ * the files behind it.
  *
- * Reached from the assignment screen once the files are uploaded and signed.
- * The whole handout — the title, the instructions, a link per file — is inside
- * the code itself, so this screen holds no state and needs no network: it is
- * handed the encoded string as a route parameter and draws it.
+ * This screen is the whole transfer. Opening it turns the teacher's phone into
+ * a Wi-Fi access point and a file server; leaving it turns both off again. The
+ * code on screen is not a link to anything — there is nothing on the far side
+ * of it — it carries the assignment itself plus the network name, password,
+ * port and token a student's phone needs to join and ask.
  *
- * That also means it can be reached again later with the same parameter and
- * will produce exactly the same code, which matters more than it sounds. A
- * teacher who dismissed this by accident, or whose class was still getting
- * their cameras out, can come back to the identical handout rather than
- * re-uploading and re-signing.
+ * ## Why the work happens here and not on the assignment screen
+ *
+ * Because the group only lives as long as this screen does, and the teacher
+ * needs to see that. A phone quietly running an open access point after the
+ * lesson ended is not something to leave to a stray `useEffect` somewhere else:
+ * the thing that starts it is the thing on screen saying it is running, and the
+ * back button is what stops it.
+ *
+ * ## The live count
+ *
+ * The teacher can see students arriving. That is not decoration — it is the
+ * only feedback in the room that any of this worked. Without it a teacher holds
+ * up a code and has no idea whether thirty phones got the worksheet or none
+ * did, and has to ask.
  */
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Share, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
 import { Screen, TopBar } from '@/components/layout';
 import { QrCode } from '@/components/QrCode';
-import { Button, Card, EmptyState, Overline } from '@/components/ui';
+import { Card, EmptyState, Overline } from '@/components/ui';
 import { useT } from '@/i18n/useT';
-import { decodeHandout, HANDOUT_URL } from '@/lib/handout';
 import { formatBytes } from '@/lib/attachments';
-import { LINK_DAYS } from '@/lib/handoutShare';
+import { beamToken } from '@/lib/beam';
+import {
+  beamBlocker,
+  BeamNotPermitted,
+  BeamTooBig,
+  onBeamPeer,
+  startBeam,
+  stopBeam,
+} from '@/lib/beamShare';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body, text } from '@/theme/type';
 
+type Arg = { uri: string; name: string; mime: string; size: number };
+
 export default function HandoutScreen() {
   const t = useT();
-  const router = useRouter();
   const { color } = useTheme();
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
 
-  const { data } = useLocalSearchParams<{ data?: string }>();
-  const handout = data ? decodeHandout(data) : null;
+  const params = useLocalSearchParams<{
+    title?: string;
+    instructions?: string;
+    teacher?: string;
+    files?: string;
+  }>();
 
-  if (!handout) {
+  const files = useMemo<Arg[]>(() => {
+    try {
+      const parsed = JSON.parse(params.files || '[]') as Arg[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }, [params.files]);
+
+  /**
+   * Fixed for the life of the screen.
+   *
+   * A token regenerated on re-render would invalidate the code the class is
+   * currently pointing their cameras at, which is the sort of bug that only
+   * shows up in front of thirty people.
+   */
+  const token = useRef(beamToken()).current;
+  const madeAt = useRef(Math.floor(Date.now() / 1000)).current;
+
+  const [payload, setPayload] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [received, setReceived] = useState(0);
+  const [busyPeers, setBusyPeers] = useState(0);
+
+  const assignment = useMemo(
+    () => ({
+      v: 1 as const,
+      t: params.title || t('assign.new'),
+      b: params.instructions || '',
+      w: params.teacher || '',
+      d: madeAt,
+      f: files.map((f) => ({ n: f.name, m: f.mime, s: f.size })),
+    }),
+    [params.title, params.instructions, params.teacher, files, madeAt, t],
+  );
+
+  /* ------------------------------------------------------- Start and stop */
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+
+      const run = async () => {
+        const blocker = beamBlocker();
+        if (blocker) {
+          setError(t(`beam.${blocker}`));
+          return;
+        }
+        try {
+          const { payload: encoded } = await startBeam(assignment, files, token);
+          // The teacher left while Android was bringing the group up. Take it
+          // straight back down — the cleanup below already ran.
+          if (cancelled) {
+            void stopBeam();
+            return;
+          }
+          setPayload(encoded);
+        } catch (e) {
+          if (cancelled) return;
+          if (e instanceof BeamTooBig) setError(t('beam.tooBig'));
+          else if (e instanceof BeamNotPermitted) setError(t('beam.permission'));
+          else setError(e instanceof Error ? e.message : String(e));
+        }
+      };
+
+      void run();
+
+      return () => {
+        cancelled = true;
+        // Unconditional. Leaving this screen must take the access point down
+        // whether it came up cleanly, failed halfway, or is still starting.
+        void stopBeam();
+      };
+    }, [assignment, files, token, t]),
+  );
+
+  /* --------------------------------------------------- Students arriving */
+
+  useEffect(
+    () =>
+      onBeamPeer((event) => {
+        if (event.kind === 'started') setBusyPeers((n) => n + 1);
+        else if (event.kind === 'done') {
+          setBusyPeers((n) => Math.max(0, n - 1));
+          setReceived(event.total);
+        } else if (event.kind === 'failed' || event.kind === 'rejected') {
+          setBusyPeers((n) => Math.max(0, n - 1));
+        }
+      }),
+    [],
+  );
+
+  /* ------------------------------------------------------------- Render */
+
+  if (error) {
     return (
       <Screen>
-        <TopBar title={t('handout.title')} dismiss />
-        <EmptyState title={t('handout.tooBig')} hint={t('handout.needSomething')} />
+        <TopBar title={t('beam.title')} dismiss />
+        <EmptyState title={t('beam.cannotShare')} hint={error} />
       </Screen>
     );
   }
 
-  const link = `${HANDOUT_URL}#${data}`;
-
   return (
     <Screen>
-      <TopBar title={t('handout.title')} dismiss />
+      <TopBar title={t('beam.title')} dismiss />
 
       <ScrollView
-        contentContainerStyle={{
-          padding: space.gutter,
-          paddingBottom: insets.bottom + 32,
-        }}
+        contentContainerStyle={{ padding: space.gutter, paddingBottom: insets.bottom + 32 }}
         showsVerticalScrollIndicator={false}>
         {/*
-          The code first and large. Everything else on this screen is for the
-          teacher; this part is for a camera three metres away, and it gets the
-          width of the screen because scannability is a function of how big each
-          module lands on the sensor.
+          The code first and large. Everything else here is for the teacher;
+          this part is for a camera three metres away, and it gets the width of
+          the screen because scannability is a function of how big each module
+          lands on the sensor.
         */}
         <View style={styles.codeWrap}>
-          <QrCode value={link} size={300} />
+          {payload ? (
+            <QrCode value={payload} size={300} />
+          ) : (
+            <View style={styles.starting}>
+              <ActivityIndicator color={color.primary} />
+              <Text style={styles.startingLabel}>{t('beam.starting')}</Text>
+            </View>
+          )}
         </View>
 
-        <Text style={styles.scanHint}>{t('handout.scanHint')}</Text>
+        <Text style={styles.scanHint}>{t('beam.scanHint')}</Text>
+
+        {/*
+          The only feedback in the room that any of this worked. A teacher
+          holding up a code with no counter has to ask thirty people whether it
+          arrived.
+        */}
+        {payload ? (
+          <View style={styles.tally}>
+            <Icon name="check" size={15} color={color.successDeep} />
+            <Text style={styles.tallyLabel}>
+              {t('beam.received', { count: received })}
+              {busyPeers > 0 ? ` · ${t('beam.receiving', { count: busyPeers })}` : ''}
+            </Text>
+          </View>
+        ) : null}
 
         <Card style={styles.details}>
-          <Text style={styles.title}>{handout.t}</Text>
-          {handout.w ? (
-            <Text style={styles.from}>{t('handout.from', { name: handout.w })}</Text>
+          <Text style={styles.title}>{assignment.t}</Text>
+          {assignment.w ? (
+            <Text style={styles.from}>{t('beam.from', { name: assignment.w })}</Text>
           ) : null}
-          {handout.b ? <Text style={styles.instructions}>{handout.b}</Text> : null}
+          {assignment.b ? <Text style={styles.instructions}>{assignment.b}</Text> : null}
         </Card>
 
-        <Overline style={styles.label}>{t('handout.files')}</Overline>
-        {handout.f.length ? (
+        <Overline style={styles.label}>{t('beam.files')}</Overline>
+        {files.length ? (
           <Card style={styles.fileList}>
-            {handout.f.map((file, i) => (
-              <View key={`${file.n}-${i}`} style={styles.fileRow}>
+            {files.map((file, i) => (
+              <View key={`${file.name}-${i}`} style={styles.fileRow}>
                 <View style={[styles.fileGlyph, { backgroundColor: color.primaryTint }]}>
                   <Icon name="paperclip" size={15} color={color.primary} />
                 </View>
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.fileName} numberOfLines={1}>
-                    {file.n}
+                    {file.name}
                   </Text>
-                  <Text style={styles.fileMeta}>{formatBytes(file.s)}</Text>
+                  <Text style={styles.fileMeta}>{formatBytes(file.size)}</Text>
                 </View>
               </View>
             ))}
           </Card>
         ) : (
           <Card style={styles.emptyFiles}>
-            <Text style={styles.fileMeta}>{t('handout.noFiles')}</Text>
+            <Text style={styles.fileMeta}>{t('beam.noFiles')}</Text>
           </Card>
         )}
 
         {/*
-          Said out loud, because the two halves of a handout expire differently
-          and a teacher who does not know that will be surprised in a week.
+          Said out loud, because "leave this screen open" is a requirement the
+          teacher cannot guess and will otherwise break by tabbing away.
         */}
-        {handout.f.length ? (
-          <Text style={styles.expiry}>{t('handout.expires', { days: LINK_DAYS })}</Text>
-        ) : null}
-
-        {/*
-          For the student whose camera will not focus, or who is not in the
-          room. The same link, through whatever the phone can send.
-        */}
-        <Button
-          label={t('handout.shareLink')}
-          icon="send"
-          variant="outline"
-          style={{ marginTop: 18 }}
-          onPress={() => void Share.share({ message: link })}
-        />
+        <Text style={styles.note}>{t('beam.keepOpen')}</Text>
       </ScrollView>
     </Screen>
   );
@@ -127,7 +248,9 @@ export default function HandoutScreen() {
 
 const makeStyles = ({ color }: Theme) =>
   StyleSheet.create({
-    codeWrap: { alignItems: 'center', paddingVertical: 4 },
+    codeWrap: { alignItems: 'center', paddingVertical: 4, minHeight: 300, justifyContent: 'center' },
+    starting: { alignItems: 'center', gap: 14 },
+    startingLabel: { fontFamily: body[500], fontSize: 13, color: color.mutedLight },
     scanHint: {
       fontFamily: body[500],
       fontSize: 13,
@@ -135,10 +258,18 @@ const makeStyles = ({ color }: Theme) =>
       color: color.mutedLight,
       textAlign: 'center',
       marginTop: 14,
-      marginBottom: 20,
     },
 
-    details: { padding: 16, marginBottom: 22 },
+    tally: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      marginTop: 14,
+    },
+    tallyLabel: { fontFamily: body[600], fontSize: 13, color: color.inkSoft },
+
+    details: { padding: 16, marginTop: 22, marginBottom: 22 },
     title: { ...text.section, color: color.ink },
     from: { fontFamily: body[500], fontSize: 12.5, color: color.mutedLight, marginTop: 3 },
     instructions: {
@@ -163,11 +294,12 @@ const makeStyles = ({ color }: Theme) =>
     fileName: { fontFamily: body[600], fontSize: 14, color: color.ink },
     fileMeta: { fontFamily: body[400], fontSize: 12, color: color.mutedLight, marginTop: 2 },
 
-    expiry: {
+    note: {
       fontFamily: body[400],
       fontSize: 12,
       lineHeight: 18,
       color: color.mutedLight,
-      marginTop: 14,
+      marginTop: 16,
+      textAlign: 'center',
     },
   });
