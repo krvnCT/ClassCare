@@ -8,10 +8,14 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.net.wifi.WifiManager
+import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import androidx.annotation.RequiresApi
+import kotlin.random.Random
 
 /** The group a teacher just created, as the QR needs to describe it. */
 data class Group(val ssid: String, val passphrase: String, val host: String)
@@ -91,7 +95,28 @@ class WifiDirectHost(context: Context) {
   }
 
   /**
-   * Create the group, then call back once it has a name and an address.
+   * Everything that happened, in order, for the screen to show when it fails.
+   *
+   * The first version of this reported "did not come up in time" and nothing
+   * else, which is unactionable on a phone with Wi-Fi and Location both on —
+   * and this is the sort of bug that only ever reproduces on somebody else's
+   * handset. Each step is logged under `Beam` for `adb logcat -s Beam` and kept
+   * here so a teacher with no cable can read the same trace off the screen.
+   */
+  private val trace = ArrayDeque<String>()
+
+  private fun note(line: String) {
+    Log.i(TAG, line)
+    synchronized(trace) {
+      trace.addLast(line)
+      while (trace.size > 12) trace.removeFirst()
+    }
+  }
+
+  private fun traceText(): String = synchronized(trace) { trace.joinToString(" · ") }
+
+  /**
+   * Create the group, then call back once it is up.
    *
    * Always on the main thread — `WifiP2pManager.Channel` is bound to the looper
    * it was initialised with, and calling in from a worker is undefined.
@@ -101,17 +126,74 @@ class WifiDirectHost(context: Context) {
     val wifi = manager ?: return done(Result.failure(BeamUnavailableException()))
 
     main.post {
-      val ch = channel ?: wifi.initialize(app, Looper.getMainLooper(), null).also { channel = it }
+      /*
+        A real channel listener, where this used to pass null.
+
+        The framework drops the channel when the Wi-Fi stack restarts, and
+        every call on a dead channel then silently does nothing — no error, no
+        callback. That is indistinguishable from a group that is slow to appear,
+        and it is one of the ways this timed out on a phone with everything
+        switched on.
+      */
+      val ch = channel ?: wifi.initialize(app, Looper.getMainLooper()) {
+        note("channel disconnected")
+        channel = null
+      }.also { channel = it }
+
       if (ch == null) return@post done(Result.failure(BeamUnavailableException()))
+      note("channel ready, sdk=${Build.VERSION.SDK_INT}")
 
       // A group left behind by a previous share — or by a crash — makes
       // `createGroup` fail with BUSY. Clearing first is cheap and it is the
       // single most common reason sharing refuses to start twice in a row.
       wifi.removeGroup(ch, object : WifiP2pManager.ActionListener {
-        override fun onSuccess() = create(wifi, ch, timeoutMs, done)
-        override fun onFailure(reason: Int) = create(wifi, ch, timeoutMs, done)
+        override fun onSuccess() {
+          note("old group removed")
+          // Not immediately. The removal is asynchronous inside the framework
+          // whatever this callback says, and creating into a half-torn-down
+          // group is a BUSY that then never resolves.
+          main.postDelayed({ create(wifi, ch, timeoutMs, done) }, SETTLE_MS)
+        }
+
+        override fun onFailure(reason: Int) {
+          note("no old group (${describe(reason)})")
+          main.postDelayed({ create(wifi, ch, timeoutMs, done) }, SETTLE_MS)
+        }
       })
     }
+  }
+
+  /**
+   * A network name and password of our own.
+   *
+   * The reason this exists is the bug it fixes. The old code called the
+   * no-argument `createGroup` and then polled `requestGroupInfo` until it
+   * reported a name *and* a passphrase — but plenty of OEM builds return null
+   * from `getPassphrase()` for a group the framework generated itself, so the
+   * poll never succeeded and the whole thing timed out on a phone where
+   * everything was working.
+   *
+   * Choosing them ourselves removes the question. `createGroup(config)` is
+   * API 29 and up; below that there is no way to specify them and the old path
+   * is all there is.
+   *
+   * The name must begin with `DIRECT-` — the framework rejects anything else —
+   * and the passphrase must be 8 to 63 characters.
+   */
+  @RequiresApi(Build.VERSION_CODES.Q)
+  private fun ourConfig(): Pair<WifiP2pConfig, Group> {
+    val tag = (1..4).map { ALPHABET.random() }.joinToString("")
+    val ssid = "DIRECT-$tag-ClassCare"
+    val passphrase = (1..10).map { ALPHABET[Random.nextInt(ALPHABET.length)] }.joinToString("")
+    val config = WifiP2pConfig.Builder()
+      .setNetworkName(ssid)
+      .setPassphrase(passphrase)
+      // 2.4 GHz: it carries further across a classroom and every phone in one
+      // supports it. 5 GHz would be faster and is not the constraint here.
+      .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ)
+      .enablePersistentMode(false)
+      .build()
+    return config to Group(ssid, passphrase, GROUP_OWNER)
   }
 
   @Suppress("MissingPermission")
@@ -131,45 +213,78 @@ class WifiDirectHost(context: Context) {
       done(result)
     }
 
+    /** Ours when we chose them, the framework's when we could not. */
+    val chosen = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ourConfig() else null
+
+    fun address(then: (String) -> Unit) {
+      wifi.requestConnectionInfo(ch) { info ->
+        then(info?.groupOwnerAddress?.hostAddress ?: GROUP_OWNER)
+      }
+      // `requestConnectionInfo` can answer with a null address, or not answer
+      // at all, for a moment after the group appears. The convention address is
+      // correct on every Android build there has ever been, so do not hang on
+      // the polite version of the question.
+      main.postDelayed({ if (!settled) then(GROUP_OWNER) }, ADDRESS_GRACE_MS)
+    }
+
     fun poll() {
       if (settled) return
       if (System.currentTimeMillis() > giveUp) {
-        // Say what the framework actually said, when it said anything. A bare
-        // timeout sent us looking at the socket code twice for what was a
-        // BUSY from a group the previous run had left behind.
         val why = lastFailure?.let { " ($it)" } ?: ""
-        return finish(Result.failure(BeamGroupException("timeout$why")))
+        note("gave up after ${timeoutMs}ms")
+        return finish(Result.failure(BeamGroupException("timeout$why", traceText())))
       }
       wifi.requestGroupInfo(ch) { group ->
-        val ssid = group?.networkName
-        val passphrase = group?.passphrase
-        if (group != null && group.isGroupOwner && !ssid.isNullOrEmpty() && !passphrase.isNullOrEmpty()) {
-          // The group owner is 192.168.49.1 on every Android build there has
-          // ever been, but it is a convention rather than a promise, so ask
-          // when the framework is willing to say and fall back when it is not.
-          wifi.requestConnectionInfo(ch) { info ->
-            val host = info?.groupOwnerAddress?.hostAddress ?: GROUP_OWNER
-            finish(Result.success(Group(ssid, passphrase, host)))
-          }
-          // `requestConnectionInfo` can answer with a null address for a moment
-          // after the group appears. Keep polling until one of the two settles.
-          main.postDelayed({ if (!settled) poll() }, POLL_MS)
-        } else {
+        if (group == null || !group.isGroupOwner) {
           main.postDelayed(::poll, POLL_MS)
+          return@requestGroupInfo
         }
+
+        /*
+          The group exists. Its own name and passphrase are preferred when it
+          will say them, and ours are used when it will not — which is the whole
+          point of having chosen them.
+
+          Without a fallback this is where it used to stop: a real, working
+          group, reported with a null passphrase, polled until the timeout.
+        */
+        val ssid = group.networkName?.takeIf { it.isNotEmpty() } ?: chosen?.second?.ssid
+        val passphrase = group.passphrase?.takeIf { it.isNotEmpty() } ?: chosen?.second?.passphrase
+
+        if (ssid.isNullOrEmpty() || passphrase.isNullOrEmpty()) {
+          note("group up but unnamed, waiting")
+          main.postDelayed(::poll, POLL_MS)
+          return@requestGroupInfo
+        }
+
+        note("group up: $ssid")
+        address { host -> finish(Result.success(Group(ssid, passphrase, host))) }
       }
     }
 
-    wifi.createGroup(ch, object : WifiP2pManager.ActionListener {
-      override fun onSuccess() = poll()
+    val listener = object : WifiP2pManager.ActionListener {
+      override fun onSuccess() {
+        note("createGroup accepted")
+        poll()
+      }
+
       override fun onFailure(reason: Int) {
         lastFailure = describe(reason)
+        note("createGroup refused: ${describe(reason)}")
         // BUSY often means a group already exists — which is a success in
         // disguise, so look before giving up.
         if (reason == WifiP2pManager.BUSY) poll()
-        else finish(Result.failure(BeamGroupException(describe(reason))))
+        else finish(Result.failure(BeamGroupException(describe(reason), traceText())))
       }
-    })
+    }
+
+    if (chosen != null) {
+      note("createGroup with our own name")
+      wifi.createGroup(ch, chosen.first, listener)
+    } else {
+      note("createGroup, legacy (sdk<29)")
+      wifi.createGroup(ch, listener)
+    }
   }
 
   @Suppress("MissingPermission")
@@ -187,7 +302,13 @@ class WifiDirectHost(context: Context) {
   }
 
   companion object {
+    private const val TAG = "Beam"
     private const val POLL_MS = 400L
+    /** Long enough for the framework to finish tearing an old group down. */
+    private const val SETTLE_MS = 600L
+    /** How long to be polite about asking for the address before assuming it. */
+    private const val ADDRESS_GRACE_MS = 1_500L
+    private const val ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
     const val GROUP_OWNER = "192.168.49.1"
   }
 }

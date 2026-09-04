@@ -86,6 +86,15 @@ export default function HandoutScreen() {
   const [error, setError] = useState<string | null>(null);
   /** Set when the fix is a system switch, so the screen can offer the screen. */
   const [settingOff, setSettingOff] = useState<'wifiOff' | 'locationOff' | null>(null);
+  /**
+   * The native trace, shown small under the message.
+   *
+   * Ugly on purpose and only present when something failed. This is the class
+   * of bug that reproduces on one handset and no other, and a teacher who can
+   * photograph six words of trace has given a far better report than one who
+   * can only say it did not work.
+   */
+  const [detail, setDetail] = useState<string | null>(null);
   /** Bumped to re-run the effect after the teacher has been to Settings. */
   const [attempt, setAttempt] = useState(0);
   const [received, setReceived] = useState(0);
@@ -112,6 +121,7 @@ export default function HandoutScreen() {
       const run = async () => {
         setError(null);
         setSettingOff(null);
+        setDetail(null);
 
         const blocker = beamBlocker();
         if (blocker) {
@@ -137,9 +147,14 @@ export default function HandoutScreen() {
             setError(t(`beam.${e.setting}`));
           } else if (e instanceof Error && e.message.startsWith('timeout')) {
             // The group never materialised. Almost always a Wi-Fi stack that
-            // needs bouncing — say that rather than showing the raw word.
+            // needs bouncing — say that rather than showing the raw word, and
+            // keep the trace underneath for when it is not.
             setError(t('beam.timeout'));
-          } else setError(e instanceof Error ? e.message : String(e));
+            setDetail(e.message);
+          } else {
+            setError(e instanceof Error ? e.message : String(e));
+            if (e instanceof Error) setDetail(e.message);
+          }
         }
       };
 
@@ -177,6 +192,7 @@ export default function HandoutScreen() {
       <Screen>
         <TopBar title={t('beam.title')} dismiss />
         <EmptyState title={t('beam.cannotShare')} hint={error} />
+        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
         {/*
           A way out, not just a diagnosis. Both of these are one switch away,
           and a teacher standing in front of a class should not have to guess
@@ -285,6 +301,15 @@ export default function HandoutScreen() {
 const makeStyles = ({ color }: Theme) =>
   StyleSheet.create({
     rescue: { paddingHorizontal: space.gutter, paddingBottom: 28, gap: 10 },
+    detail: {
+      fontFamily: body[400],
+      fontSize: 11,
+      lineHeight: 16,
+      color: color.mutedLight,
+      textAlign: 'center',
+      paddingHorizontal: space.gutter,
+      paddingBottom: 14,
+    },
     codeWrap: { alignItems: 'center', paddingVertical: 4, minHeight: 300, justifyContent: 'center' },
     starting: { alignItems: 'center', gap: 14 },
     startingLabel: { fontFamily: body[500], fontSize: 13, color: color.mutedLight },

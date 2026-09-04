@@ -271,7 +271,16 @@ class MissingContextException :
 class BeamUnavailableException :
   CodedException("ERR_BEAM_UNSUPPORTED", "This phone does not support Wi-Fi Direct.", null)
 
-class BeamGroupException(reason: String) : CodedException("ERR_BEAM_GROUP", reason, null)
+/**
+ * The group would not start.
+ *
+ * `trace` is the sequence of steps that led there, appended to the message
+ * because this is the failure that only ever happens on somebody else's phone
+ * — and asking a teacher in a classroom to attach a cable and run logcat is
+ * not a bug report anyone is going to get.
+ */
+class BeamGroupException(reason: String, trace: String = "") :
+  CodedException("ERR_BEAM_GROUP", if (trace.isEmpty()) reason else "$reason\n$trace", null)
 
 class BeamWifiOffException : CodedException(
   "ERR_BEAM_WIFI_OFF",
