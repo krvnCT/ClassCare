@@ -105,18 +105,39 @@ class WifiDirectHost(context: Context) {
    * `p2p0` is excluded by name: that is the interface *we* bring up, and
    * matching it would make the check refuse the thing it is guarding.
    */
-  private fun hotspotOn(): Boolean =
-    runCatching {
-      NetworkInterface.getNetworkInterfaces().toList().any { iface ->
-        val name = iface.name.lowercase()
+  private fun hotspotOn(): Boolean {
+    val interfaces = runCatching { NetworkInterface.getNetworkInterfaces()?.toList() }
+      .getOrNull() ?: return false
+
+    for (iface in interfaces) {
+      /*
+        Guarded one at a time, not around the whole loop.
+
+        `isUp` and `getInetAddresses` throw `SocketException` for some virtual
+        interfaces, and this phone carries about forty of them — ccmni0 to
+        ccmni20, tunl0, gre0, ip6tnl0. Wrapping the whole scan meant the first
+        one to throw aborted it and the answer came back "no hotspot", which is
+        exactly the check failing silently at the job it exists for.
+      */
+      val hit = runCatching {
+        val name = iface.name?.lowercase() ?: return@runCatching false
+        // `p2p` first: that is the interface we bring up ourselves, and
+        // matching it would make this refuse the very thing it guards.
+        if (name.startsWith("p2p")) return@runCatching false
         val looksLikeAp =
-          name.startsWith("ap") || name.startsWith("softap") || name == "wlan1" || name == "swlan0"
-        looksLikeAp &&
-          !name.startsWith("p2p") &&
-          iface.isUp &&
-          iface.inetAddresses.toList().any { !it.isLoopbackAddress && it is Inet4Address }
+          name.startsWith("ap") || name.startsWith("softap") ||
+            name == "wlan1" || name == "swlan0"
+        if (!looksLikeAp || !iface.isUp) return@runCatching false
+        iface.inetAddresses.toList().any { !it.isLoopbackAddress && it is Inet4Address }
+      }.getOrDefault(false)
+
+      if (hit) {
+        note("hotspot is up on ${iface.name}")
+        return true
       }
-    }.getOrDefault(false)
+    }
+    return false
+  }
 
   private fun locationOn(): Boolean {
     val lm = app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return true
