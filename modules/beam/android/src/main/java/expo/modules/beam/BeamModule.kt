@@ -71,6 +71,16 @@ class BeamModule : Module() {
       context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
     }
 
+    /**
+     * What would stop a share right now: "unsupported", "wifiOff",
+     * "locationOff", or null.
+     *
+     * Asked before starting rather than discovered by waiting. Each of these
+     * used to spend twenty seconds becoming a timeout, and a timeout is the one
+     * error message that tells a teacher nothing about what to do next.
+     */
+    Function("blocker") { WifiDirectHost(context).blocker() }
+
     /** False below Android 10: the student has to join the network by hand. */
     Function("canJoinAutomatically") { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }
 
@@ -88,7 +98,11 @@ class BeamModule : Module() {
       stopHost()
 
       val directHost = WifiDirectHost(context).also { host = it }
-      if (!directHost.available) throw BeamUnavailableException()
+      when (directHost.blocker()) {
+        "unsupported" -> throw BeamUnavailableException()
+        "wifiOff" -> throw BeamWifiOffException()
+        "locationOff" -> throw BeamLocationOffException()
+      }
 
       directHost.start(GROUP_TIMEOUT_MS) { result ->
         val group = result.getOrElse {
@@ -221,8 +235,12 @@ class BeamModule : Module() {
     this as? CodedException ?: BeamFailedException(message ?: javaClass.simpleName)
 
   companion object {
-    /** Bringing a group up is a few seconds on a good phone and slow on a bad one. */
-    private const val GROUP_TIMEOUT_MS = 20_000L
+    /**
+     * Bringing a group up is a few seconds on a good phone and slow on a bad
+     * one. Generous, because the preflight in `blocker()` now catches the cases
+     * that were never going to succeed however long they were given.
+     */
+    private const val GROUP_TIMEOUT_MS = 30_000L
 
     /** Includes the student tapping "Connect" in the system dialog. */
     private const val JOIN_TIMEOUT_MS = 45_000
@@ -254,6 +272,25 @@ class BeamUnavailableException :
   CodedException("ERR_BEAM_UNSUPPORTED", "This phone does not support Wi-Fi Direct.", null)
 
 class BeamGroupException(reason: String) : CodedException("ERR_BEAM_GROUP", reason, null)
+
+class BeamWifiOffException : CodedException(
+  "ERR_BEAM_WIFI_OFF",
+  "Wi-Fi is switched off.",
+  null,
+)
+
+/**
+ * Location Services is off at the system level.
+ *
+ * Not the permission — that is asked for separately and may well be granted.
+ * Android will not bring up a Wi-Fi Direct group while the setting is off, and
+ * it does so by quietly never producing one rather than by failing.
+ */
+class BeamLocationOffException : CodedException(
+  "ERR_BEAM_LOCATION_OFF",
+  "Location Services is switched off.",
+  null,
+)
 
 class BeamJoinException(reason: String) : CodedException("ERR_BEAM_JOIN", reason, null)
 

@@ -1,11 +1,13 @@
 package expo.modules.beam
 
 import android.content.Context
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
+import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Handler
@@ -56,6 +58,39 @@ class WifiDirectHost(context: Context) {
   val available: Boolean get() = manager != null
 
   /**
+   * What is standing in the way, before anything is attempted.
+   *
+   * Every one of these used to surface as "Wi-Fi Direct did not come up in
+   * time" twenty seconds later, which tells the teacher nothing they can act
+   * on. They are all one tap away from being fixed, and none of them are the
+   * app's to fix silently.
+   *
+   * Location is the surprising one. Wi-Fi Direct brings up an access point,
+   * and Android treats that as location-adjacent: with Location Services
+   * switched *off* at the system level, `createGroup` reports success and the
+   * group never appears — no error, no callback, nothing. Holding the
+   * permission is not the same as the setting being on.
+   */
+  fun blocker(): String? {
+    if (manager == null) return "unsupported"
+    val wifi = app.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    if (wifi?.isWifiEnabled != true) return "wifiOff"
+    if (!locationOn()) return "locationOff"
+    return null
+  }
+
+  private fun locationOn(): Boolean {
+    val lm = app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return true
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      lm.isLocationEnabled
+    } else {
+      @Suppress("DEPRECATION")
+      lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+        lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+    }
+  }
+
+  /**
    * Create the group, then call back once it has a name and an address.
    *
    * Always on the main thread — `WifiP2pManager.Channel` is bound to the looper
@@ -87,6 +122,7 @@ class WifiDirectHost(context: Context) {
     done: (Result<Group>) -> Unit,
   ) {
     var settled = false
+    var lastFailure: String? = null
     val giveUp = System.currentTimeMillis() + timeoutMs
 
     fun finish(result: Result<Group>) {
@@ -98,7 +134,11 @@ class WifiDirectHost(context: Context) {
     fun poll() {
       if (settled) return
       if (System.currentTimeMillis() > giveUp) {
-        return finish(Result.failure(BeamGroupException("Wi-Fi Direct did not come up in time")))
+        // Say what the framework actually said, when it said anything. A bare
+        // timeout sent us looking at the socket code twice for what was a
+        // BUSY from a group the previous run had left behind.
+        val why = lastFailure?.let { " ($it)" } ?: ""
+        return finish(Result.failure(BeamGroupException("timeout$why")))
       }
       wifi.requestGroupInfo(ch) { group ->
         val ssid = group?.networkName
@@ -123,6 +163,7 @@ class WifiDirectHost(context: Context) {
     wifi.createGroup(ch, object : WifiP2pManager.ActionListener {
       override fun onSuccess() = poll()
       override fun onFailure(reason: Int) {
+        lastFailure = describe(reason)
         // BUSY often means a group already exists — which is a success in
         // disguise, so look before giving up.
         if (reason == WifiP2pManager.BUSY) poll()
@@ -139,13 +180,14 @@ class WifiDirectHost(context: Context) {
   }
 
   private fun describe(reason: Int) = when (reason) {
-    WifiP2pManager.P2P_UNSUPPORTED -> "This phone does not support Wi-Fi Direct"
-    WifiP2pManager.BUSY -> "Wi-Fi Direct is busy"
-    else -> "Wi-Fi Direct refused to start a group"
+    WifiP2pManager.P2P_UNSUPPORTED -> "unsupported"
+    WifiP2pManager.BUSY -> "busy"
+    WifiP2pManager.ERROR -> "error"
+    else -> "refused"
   }
 
   companion object {
-    private const val POLL_MS = 500L
+    private const val POLL_MS = 400L
     const val GROUP_OWNER = "192.168.49.1"
   }
 }

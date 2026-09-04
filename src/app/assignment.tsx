@@ -156,8 +156,11 @@ export default function Assignment() {
   const send = async () => {
     if (blocker || busy) return;
     if (!hasSupabase) {
-      // No project means no storage to upload to and no server to send from.
-      void showAlert(t('assign.title'), t('assign.emailOnly'));
+      // No project means no storage to upload to and no server to send from —
+      // which stops the *email*, and nothing else. The QR needs neither, so the
+      // message says which of the two is unavailable rather than implying the
+      // screen is.
+      void showAlert(t('assign.title'), t('assign.noServer'));
       return;
     }
 
@@ -240,7 +243,7 @@ export default function Assignment() {
         <View style={styles.note}>
           <Icon name="info" size={16} color={color.primary} />
           <Text style={styles.noteText}>
-            {t('assign.studentsOnly')} {t('assign.emailOnly')}
+            {t('assign.studentsOnly')} {t('assign.bothWays')}
           </Text>
         </View>
 

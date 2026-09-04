@@ -56,6 +56,14 @@ export type BeamEvents = {
 export declare class BeamModuleType extends NativeModule<BeamEvents> {
   /** False on a phone with no Wi-Fi Direct radio. Hide the button. */
   isAvailable(): boolean;
+  /**
+   * What would stop a share right now, or null.
+   *
+   * Asked before starting rather than discovered by waiting: each of these
+   * otherwise spends thirty seconds becoming a timeout, which is the one error
+   * that tells a teacher nothing about what to do next.
+   */
+  blocker(): 'unsupported' | 'wifiOff' | 'locationOff' | null;
   /** False below Android 10 — the student must join the network by hand. */
   canJoinAutomatically(): boolean;
   getPermissionsAsync(): Promise<{ granted: boolean; canAskAgain: boolean; status: string }>;

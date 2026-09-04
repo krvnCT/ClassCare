@@ -25,21 +25,23 @@
  */
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
 import { Screen, TopBar } from '@/components/layout';
 import { QrCode } from '@/components/QrCode';
-import { Card, EmptyState, Overline } from '@/components/ui';
+import { Button, Card, EmptyState, Overline } from '@/components/ui';
 import { useT } from '@/i18n/useT';
 import { formatBytes } from '@/lib/attachments';
 import { beamToken } from '@/lib/beam';
 import {
   beamBlocker,
   BeamNotPermitted,
+  BeamSettingOff,
   BeamTooBig,
   onBeamPeer,
+  SETTINGS_INTENT,
   startBeam,
   stopBeam,
 } from '@/lib/beamShare';
@@ -82,6 +84,10 @@ export default function HandoutScreen() {
 
   const [payload, setPayload] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Set when the fix is a system switch, so the screen can offer the screen. */
+  const [settingOff, setSettingOff] = useState<'wifiOff' | 'locationOff' | null>(null);
+  /** Bumped to re-run the effect after the teacher has been to Settings. */
+  const [attempt, setAttempt] = useState(0);
   const [received, setReceived] = useState(0);
   const [busyPeers, setBusyPeers] = useState(0);
 
@@ -104,8 +110,12 @@ export default function HandoutScreen() {
       let cancelled = false;
 
       const run = async () => {
+        setError(null);
+        setSettingOff(null);
+
         const blocker = beamBlocker();
         if (blocker) {
+          if (blocker === 'wifiOff' || blocker === 'locationOff') setSettingOff(blocker);
           setError(t(`beam.${blocker}`));
           return;
         }
@@ -122,7 +132,14 @@ export default function HandoutScreen() {
           if (cancelled) return;
           if (e instanceof BeamTooBig) setError(t('beam.tooBig'));
           else if (e instanceof BeamNotPermitted) setError(t('beam.permission'));
-          else setError(e instanceof Error ? e.message : String(e));
+          else if (e instanceof BeamSettingOff) {
+            setSettingOff(e.setting);
+            setError(t(`beam.${e.setting}`));
+          } else if (e instanceof Error && e.message.startsWith('timeout')) {
+            // The group never materialised. Almost always a Wi-Fi stack that
+            // needs bouncing — say that rather than showing the raw word.
+            setError(t('beam.timeout'));
+          } else setError(e instanceof Error ? e.message : String(e));
         }
       };
 
@@ -134,7 +151,7 @@ export default function HandoutScreen() {
         // whether it came up cleanly, failed halfway, or is still starting.
         void stopBeam();
       };
-    }, [assignment, files, token, t]),
+    }, [assignment, files, token, t, attempt]),
   );
 
   /* --------------------------------------------------- Students arriving */
@@ -160,6 +177,25 @@ export default function HandoutScreen() {
       <Screen>
         <TopBar title={t('beam.title')} dismiss />
         <EmptyState title={t('beam.cannotShare')} hint={error} />
+        {/*
+          A way out, not just a diagnosis. Both of these are one switch away,
+          and a teacher standing in front of a class should not have to guess
+          which of the phone's many settings screens holds it.
+        */}
+        <View style={styles.rescue}>
+          {settingOff ? (
+            <Button
+              label={t('beam.openSettings')}
+              icon="gear"
+              onPress={() => void Linking.sendIntent(SETTINGS_INTENT[settingOff]).catch(() => {})}
+            />
+          ) : null}
+          <Button
+            label={t('beam.tryAgain')}
+            variant="outline"
+            onPress={() => setAttempt((n) => n + 1)}
+          />
+        </View>
       </Screen>
     );
   }
@@ -248,6 +284,7 @@ export default function HandoutScreen() {
 
 const makeStyles = ({ color }: Theme) =>
   StyleSheet.create({
+    rescue: { paddingHorizontal: space.gutter, paddingBottom: 28, gap: 10 },
     codeWrap: { alignItems: 'center', paddingVertical: 4, minHeight: 300, justifyContent: 'center' },
     starting: { alignItems: 'center', gap: 14 },
     startingLabel: { fontFamily: body[500], fontSize: 13, color: color.mutedLight },

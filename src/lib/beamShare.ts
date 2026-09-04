@@ -38,7 +38,12 @@ export type { BeamPeerEvent, BeamProgressEvent };
 export type BeamOutgoing = { uri: string; name: string; mime: string; size: number };
 
 /** Why sharing cannot start. Keys into the `beam.*` strings. */
-export type BeamBlocker = 'needsRebuild' | 'unsupported' | 'permission';
+export type BeamBlocker =
+  | 'needsRebuild'
+  | 'unsupported'
+  | 'permission'
+  | 'wifiOff'
+  | 'locationOff';
 
 /**
  * Whether this build and this phone can share at all.
@@ -51,7 +56,11 @@ export type BeamBlocker = 'needsRebuild' | 'unsupported' | 'permission';
  */
 export function beamBlocker(): Exclude<BeamBlocker, 'permission'> | null {
   if (Platform.OS !== 'android' || !Beam) return 'needsRebuild';
-  return Beam.isAvailable() ? null : 'unsupported';
+  if (!Beam.isAvailable()) return 'unsupported';
+  // Wi-Fi and Location Services are both switches the teacher can flip in ten
+  // seconds, and both make a group impossible however long it is given. Asking
+  // now turns a thirty-second timeout into a sentence and a button.
+  return Beam.blocker?.() ?? null;
 }
 
 /** Thrown when the assignment will not fit in a readable code. */
@@ -71,6 +80,26 @@ export class BeamNotPermitted extends Error {
 }
 
 /**
+ * A setting the teacher has to change, and which screen changes it.
+ *
+ * Carried on the error rather than worked out at the call site, because the
+ * only place that knows Location Services is what failed is the place that
+ * checked it.
+ */
+export class BeamSettingOff extends Error {
+  constructor(readonly setting: 'wifiOff' | 'locationOff') {
+    super(`${setting} — the teacher has to switch this on`);
+    this.name = 'BeamSettingOff';
+  }
+}
+
+/** Which Android settings screen fixes it. */
+export const SETTINGS_INTENT: Record<'wifiOff' | 'locationOff', string> = {
+  wifiOff: 'android.settings.WIFI_SETTINGS',
+  locationOff: 'android.settings.LOCATION_SOURCE_SETTINGS',
+};
+
+/**
  * Start the access point and the server; return the code to hold up.
  *
  * The manifest served over the socket is the assignment *without* the network
@@ -83,6 +112,9 @@ export async function startBeam(
   token: string,
 ): Promise<{ payload: string; ssid: string; passphrase: string }> {
   if (!Beam) throw new Error('Beam is not available in this build');
+
+  const setting = Beam.blocker?.();
+  if (setting === 'wifiOff' || setting === 'locationOff') throw new BeamSettingOff(setting);
 
   const permission = await Beam.requestPermissionsAsync();
   if (!permission.granted) throw new BeamNotPermitted();
