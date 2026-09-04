@@ -14,6 +14,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import androidx.annotation.RequiresApi
 import kotlin.random.Random
 
@@ -79,9 +81,42 @@ class WifiDirectHost(context: Context) {
     if (manager == null) return "unsupported"
     val wifi = app.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
     if (wifi?.isWifiEnabled != true) return "wifiOff"
+    if (hotspotOn()) return "hotspotOn"
     if (!locationOn()) return "locationOff"
     return null
   }
+
+  /**
+   * Whether the phone's own hotspot is running.
+   *
+   * This is the one that actually happened, on a Xiaomi running Android 16, and
+   * nothing in the app or the framework said so. A Wi-Fi chipset hands out a
+   * fixed, small number of interfaces; with the hotspot holding the AP slot
+   * there is none left for Wi-Fi Direct. The system log says
+   * `bestIfaceCreationProposal is null` and then simply never brings `p2p0` up —
+   * `createGroup` reports success, no callback ever comes, and the app times
+   * out on a phone where Wi-Fi, Location and the permission are all fine.
+   *
+   * Read off the interface list rather than asked. `isWifiApEnabled` has been
+   * hidden from apps since API 26 and reflecting at it is blocked outright now;
+   * an interface called `ap0` that is up and holding an address is the same
+   * fact, needs no permission, and cannot be taken away.
+   *
+   * `p2p0` is excluded by name: that is the interface *we* bring up, and
+   * matching it would make the check refuse the thing it is guarding.
+   */
+  private fun hotspotOn(): Boolean =
+    runCatching {
+      NetworkInterface.getNetworkInterfaces().toList().any { iface ->
+        val name = iface.name.lowercase()
+        val looksLikeAp =
+          name.startsWith("ap") || name.startsWith("softap") || name == "wlan1" || name == "swlan0"
+        looksLikeAp &&
+          !name.startsWith("p2p") &&
+          iface.isUp &&
+          iface.inetAddresses.toList().any { !it.isLoopbackAddress && it is Inet4Address }
+      }
+    }.getOrDefault(false)
 
   private fun locationOn(): Boolean {
     val lm = app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return true

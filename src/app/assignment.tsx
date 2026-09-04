@@ -11,11 +11,13 @@
  * no address on file rather than quietly dropping them.
  */
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   Keyboard,
+  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -29,6 +31,11 @@ import { AttachmentPreview, isImage } from '@/components/AttachmentPreview';
 import { showAlert, showError } from '@/components/Dialog';
 import { Icon } from '@/components/Icon';
 import { FooterSummary, Screen, StickyFooter, TopBar } from '@/components/layout';
+import {
+  beamBlocker,
+  SETTINGS_INTENT,
+  type BeamBlocker,
+} from '@/lib/beamShare';
 import { Button, Card, IconButton, Overline, Press, SelectChip } from '@/components/ui';
 import { fetchMessages, sendMessage as apiSendMessage } from '@/data/api';
 import { useGroups, useStore, useStudents } from '@/data/store';
@@ -121,8 +128,35 @@ export default function Assignment() {
     class where nobody has an address on file is exactly the class this is for.
     All it wants is something to hand over.
   */
+  /*
+    Whether the phone can hand files over at all, re-read whenever this screen
+    comes forward.
+
+    Not a one-off check at mount. The whole point is that the teacher goes to
+    Settings, flips a switch and comes back — so the answer has to be asked
+    again when they return, or the button stays dead for a problem they have
+    already fixed.
+
+    `AppState` as well as focus: returning from the system Settings app does not
+    re-focus the route, because the route never lost focus. It is the *app* that
+    was backgrounded.
+  */
+  const [beamBlocked, setBeamBlocked] = useState<Exclude<BeamBlocker, 'permission'> | null>(null);
+
+  const recheck = useCallback(() => setBeamBlocked(beamBlocker()), []);
+
+  useFocusEffect(
+    useCallback(() => {
+      recheck();
+      const sub = AppState.addEventListener('change', (state) => {
+        if (state === 'active') recheck();
+      });
+      return () => sub.remove();
+    }, [recheck]),
+  );
+
   const shareByQr = () => {
-    if (busy) return;
+    if (busy || beamBlocked) return;
     if (!files.length && !instructions.trim()) {
       void showAlert(t('beam.title'), t('beam.needSomething'));
       return;
@@ -316,6 +350,27 @@ export default function Assignment() {
         </Card>
       </ScrollView>
 
+      {/*
+        Why the QR button is dead, and the way to fix it.
+
+        Above the footer rather than inside it: the footer is two controls wide
+        and a sentence in there would push them off the screen. A disabled
+        button with no explanation is the worst of both — it looks broken and
+        says nothing.
+      */}
+      {beamBlocked && beamBlocked !== 'needsRebuild' && beamBlocked !== 'unsupported' ? (
+        <Press
+          onPress={() =>
+            void Linking.sendIntent(SETTINGS_INTENT[beamBlocked]).catch(() => {})
+          }
+          style={styles.beamWarn}>
+          <Icon name="warning" size={15} color={color.warningDeep} />
+          <Text style={styles.beamWarnText}>
+            {t(`beam.${beamBlocked}`)} {t('beam.openSettings')}
+          </Text>
+        </Press>
+      ) : null}
+
       <StickyFooter>
         <FooterSummary
           title={blocker ?? t('assign.reaches', { count: withEmail.length })}
@@ -336,6 +391,7 @@ export default function Assignment() {
             <IconButton
               name="qr"
               onPress={shareByQr}
+              disabled={!!beamBlocked}
               size={48}
               iconSize={20}
               tint={color.primaryTint}
@@ -399,6 +455,27 @@ const makeStyles = ({ accents, color }: Theme) =>
       marginTop: 10,
     },
     warnText: {
+      flex: 1,
+      fontFamily: body[400],
+      fontSize: 12.5,
+      lineHeight: 18.5,
+      color: accents.amber.ink,
+    },
+
+    /* The same amber as the no-email warning, but sitting above the footer
+       rather than in the form, so it needs its own margins. */
+    beamWarn: {
+      flexDirection: 'row',
+      gap: 10,
+      alignItems: 'center',
+      backgroundColor: accents.amber.tint,
+      borderRadius: radius.control,
+      marginHorizontal: space.gutter,
+      marginBottom: 8,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+    },
+    beamWarnText: {
       flex: 1,
       fontFamily: body[400],
       fontSize: 12.5,

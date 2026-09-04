@@ -63,7 +63,7 @@ export declare class BeamModuleType extends NativeModule<BeamEvents> {
    * otherwise spends thirty seconds becoming a timeout, which is the one error
    * that tells a teacher nothing about what to do next.
    */
-  blocker(): 'unsupported' | 'wifiOff' | 'locationOff' | null;
+  blocker(): 'unsupported' | 'wifiOff' | 'hotspotOn' | 'locationOff' | null;
   /** False below Android 10 — the student must join the network by hand. */
   canJoinAutomatically(): boolean;
   getPermissionsAsync(): Promise<{ granted: boolean; canAskAgain: boolean; status: string }>;

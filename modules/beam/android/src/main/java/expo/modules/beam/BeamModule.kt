@@ -73,7 +73,7 @@ class BeamModule : Module() {
 
     /**
      * What would stop a share right now: "unsupported", "wifiOff",
-     * "locationOff", or null.
+     * "hotspotOn", "locationOff", or null.
      *
      * Asked before starting rather than discovered by waiting. Each of these
      * used to spend twenty seconds becoming a timeout, and a timeout is the one
@@ -101,6 +101,7 @@ class BeamModule : Module() {
       when (directHost.blocker()) {
         "unsupported" -> throw BeamUnavailableException()
         "wifiOff" -> throw BeamWifiOffException()
+        "hotspotOn" -> throw BeamHotspotOnException()
         "locationOff" -> throw BeamLocationOffException()
       }
 
@@ -295,6 +296,20 @@ class BeamWifiOffException : CodedException(
  * Android will not bring up a Wi-Fi Direct group while the setting is off, and
  * it does so by quietly never producing one rather than by failing.
  */
+/**
+ * The phone's own hotspot is running.
+ *
+ * A Wi-Fi chipset hands out a fixed, small number of interfaces, and the
+ * hotspot is holding the one Wi-Fi Direct needs. Observed on a Xiaomi running
+ * Android 16, where it presented as a silent timeout with every setting and
+ * permission correct.
+ */
+class BeamHotspotOnException : CodedException(
+  "ERR_BEAM_HOTSPOT",
+  "The phone's hotspot is on.",
+  null,
+)
+
 class BeamLocationOffException : CodedException(
   "ERR_BEAM_LOCATION_OFF",
   "Location Services is switched off.",

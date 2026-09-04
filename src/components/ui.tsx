@@ -194,9 +194,12 @@ export function IconButton({
   fg: fgProp,
   strokeWidth,
   radius: r = radius.control,
+  disabled,
   style,
   accessibilityLabel,
 }: {
+  /** Greyed and inert. The caller owes the reader a reason nearby. */
+  disabled?: boolean;
   name: IconName;
   onPress?: () => void;
   size?: number;
@@ -216,11 +219,14 @@ export function IconButton({
   return (
     <Press
       onPress={onPress}
+      disabled={disabled}
       accessibilityRole="button"
+      accessibilityState={{ disabled: !!disabled }}
       accessibilityLabel={accessibilityLabel}
       style={[
         styles.center,
         { width: size, height: size, borderRadius: r, backgroundColor: tint },
+        disabled ? { opacity: 0.4 } : null,
         style as ViewStyle,
       ]}>
       <Icon name={name} size={iconSize} color={fg} strokeWidth={strokeWidth} />

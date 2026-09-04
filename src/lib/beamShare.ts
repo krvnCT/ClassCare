@@ -43,6 +43,7 @@ export type BeamBlocker =
   | 'unsupported'
   | 'permission'
   | 'wifiOff'
+  | 'hotspotOn'
   | 'locationOff';
 
 /**
@@ -87,15 +88,21 @@ export class BeamNotPermitted extends Error {
  * checked it.
  */
 export class BeamSettingOff extends Error {
-  constructor(readonly setting: 'wifiOff' | 'locationOff') {
+  constructor(readonly setting: SettingOff) {
     super(`${setting} — the teacher has to switch this on`);
     this.name = 'BeamSettingOff';
   }
 }
 
+/** A blocker the teacher fixes with a switch, rather than by giving up. */
+export type SettingOff = 'wifiOff' | 'hotspotOn' | 'locationOff';
+
 /** Which Android settings screen fixes it. */
-export const SETTINGS_INTENT: Record<'wifiOff' | 'locationOff', string> = {
+export const SETTINGS_INTENT: Record<SettingOff, string> = {
   wifiOff: 'android.settings.WIFI_SETTINGS',
+  // No public action opens the hotspot page directly on every OEM, and the
+  // wireless-settings screen is one tap above it everywhere.
+  hotspotOn: 'android.settings.WIRELESS_SETTINGS',
   locationOff: 'android.settings.LOCATION_SOURCE_SETTINGS',
 };
 
@@ -114,7 +121,9 @@ export async function startBeam(
   if (!Beam) throw new Error('Beam is not available in this build');
 
   const setting = Beam.blocker?.();
-  if (setting === 'wifiOff' || setting === 'locationOff') throw new BeamSettingOff(setting);
+  if (setting === 'wifiOff' || setting === 'hotspotOn' || setting === 'locationOff') {
+    throw new BeamSettingOff(setting);
+  }
 
   const permission = await Beam.requestPermissionsAsync();
   if (!permission.granted) throw new BeamNotPermitted();

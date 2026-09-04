@@ -42,6 +42,7 @@ import {
   BeamTooBig,
   onBeamPeer,
   SETTINGS_INTENT,
+  type SettingOff,
   startBeam,
   stopBeam,
 } from '@/lib/beamShare';
@@ -85,7 +86,7 @@ export default function HandoutScreen() {
   const [payload, setPayload] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Set when the fix is a system switch, so the screen can offer the screen. */
-  const [settingOff, setSettingOff] = useState<'wifiOff' | 'locationOff' | null>(null);
+  const [settingOff, setSettingOff] = useState<SettingOff | null>(null);
   /**
    * The native trace, shown small under the message.
    *
@@ -125,7 +126,7 @@ export default function HandoutScreen() {
 
         const blocker = beamBlocker();
         if (blocker) {
-          if (blocker === 'wifiOff' || blocker === 'locationOff') setSettingOff(blocker);
+          if (blocker !== 'needsRebuild' && blocker !== 'unsupported') setSettingOff(blocker);
           setError(t(`beam.${blocker}`));
           return;
         }
