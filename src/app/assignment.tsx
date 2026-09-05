@@ -350,28 +350,31 @@ export default function Assignment() {
         </Card>
       </ScrollView>
 
-      {/*
-        Why the QR button is dead, and the way to fix it.
+      <StickyFooter
+        above={
+          /*
+            Why the QR button is dead, and the way to fix it.
 
-        Above the footer rather than inside it: the footer is two controls wide
-        and a sentence in there would push them off the screen. A disabled
-        button with no explanation is the worst of both — it looks broken and
-        says nothing.
-      */}
-      {beamBlocked && beamBlocked !== 'needsRebuild' && beamBlocked !== 'unsupported' ? (
-        <Press
-          onPress={() =>
-            void Linking.sendIntent(SETTINGS_INTENT[beamBlocked]).catch(() => {})
-          }
-          style={styles.beamWarn}>
-          <Icon name="warning" size={15} color={color.warningDeep} />
-          <Text style={styles.beamWarnText}>
-            {t(`beam.${beamBlocked}`)} {t('beam.openSettings')}
-          </Text>
-        </Press>
-      ) : null}
-
-      <StickyFooter>
+            Its own row on top of the buttons rather than beside them: the
+            footer is two controls wide and a sentence in there would push them
+            off the screen. It goes through the footer's `above` slot rather
+            than being laid out before it, because the footer is absolutely
+            positioned — a sibling above it in the parent is painted
+            underneath, which is exactly how this went unseen.
+          */
+          beamBlocked && beamBlocked !== 'needsRebuild' && beamBlocked !== 'unsupported' ? (
+            <Press
+              onPress={() =>
+                void Linking.sendIntent(SETTINGS_INTENT[beamBlocked]).catch(() => {})
+              }
+              style={styles.beamWarn}>
+              <Icon name="warning" size={15} color={color.warningDeep} />
+              <Text style={styles.beamWarnText}>
+                {t(`beam.${beamBlocked}`)} {t('beam.openSettings')}
+              </Text>
+            </Press>
+          ) : null
+        }>
         <FooterSummary
           title={blocker ?? t('assign.reaches', { count: withEmail.length })}
           hint={files.length ? `${files.length} · ${t('assign.files')}` : t('assign.needFile')}
@@ -462,16 +465,14 @@ const makeStyles = ({ accents, color }: Theme) =>
       color: accents.amber.ink,
     },
 
-    /* The same amber as the no-email warning, but sitting above the footer
-       rather than in the form, so it needs its own margins. */
+    /* The same amber as the no-email warning, but inside the footer bar rather
+       than in the form, so the bar's own padding places it and it needs none. */
     beamWarn: {
       flexDirection: 'row',
       gap: 10,
       alignItems: 'center',
       backgroundColor: accents.amber.tint,
       borderRadius: radius.control,
-      marginHorizontal: space.gutter,
-      marginBottom: 8,
       paddingHorizontal: 13,
       paddingVertical: 11,
     },

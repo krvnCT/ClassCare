@@ -153,7 +153,22 @@ export function useKeyboardLift() {
   return lift;
 }
 
-export function StickyFooter({ children, style }: { children: ReactNode; style?: ViewStyle }) {
+export function StickyFooter({
+  children,
+  above,
+  style,
+}: {
+  children: ReactNode;
+  /**
+   * A full-width row sitting on top of the buttons, inside the same bar.
+   *
+   * In the flow rather than a sibling above the footer: the footer is
+   * `position: absolute`, so anything laid out before it in the parent is
+   * painted underneath it and never seen.
+   */
+  above?: ReactNode;
+  style?: ViewStyle;
+}) {
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
   const lift = useKeyboardLift();
@@ -168,9 +183,9 @@ export function StickyFooter({ children, style }: { children: ReactNode; style?:
           // inset it reserves is padding nobody can see.
           paddingBottom: (lift ? 14 : Math.max(insets.bottom, 14)) + 6,
         },
-        style,
       ]}>
-      {children}
+      {above}
+      <View style={[styles.footerRow, style]}>{children}</View>
     </View>
   );
 }
@@ -246,6 +261,10 @@ const makeStyles = ({ color }: Theme) =>
       borderTopColor: color.border,
       paddingHorizontal: space.gutter,
       paddingTop: 12,
+      gap: 10,
+    },
+    /** The buttons themselves. `style` lands here, not on the bar. */
+    footerRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
