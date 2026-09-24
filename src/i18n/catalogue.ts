@@ -249,7 +249,7 @@ const tk = {
   'students.note': 'Bellik',
   'students.avgScore': 'Ortaça baha',
   'students.sessions': 'Sapaklar',
-  'students.searchPlaceholder': 'At ýa-da belgi boýunça gözle',
+  'students.searchPlaceholder': 'At, belgi, ene-atanyň belgisi, mekdep…',
   'csv.gender': 'Jyns',
   'student.gender': 'Jyns',
   'students.male': 'Oglan',
@@ -525,6 +525,11 @@ const tk = {
   'messages.pickChannel': 'Iň bolmanda bir usul saýla',
   'messages.groupHasNoStudents': '{name} toparynda okuwçy ýok',
   'messages.notInAnyGroup': 'Bu okuwçylar hiç bir toparda däl',
+  'messages.nobodyReachable': 'Saýlananlaryň hiç birinde belgi ýok',
+  'messages.showFinished': 'Gutaran möwsümleri görkez',
+  'messages.hideFinished': 'Gutaran möwsümleri gizle',
+  'messages.sharedNumbers':
+    '{count} belgi birnäçe okuwça degişli. Her belgä diňe bir habar gider.',
   'messages.placeholderHint':
     'Ýerine goýulýan sözler her alyja aýratyn dolýar, şoňa görä hemmesi öz adyny görýär.',
   'messages.noEmailWarning':
@@ -902,6 +907,7 @@ const tk = {
   'archive.openHint': 'Arhiwe geçirilen toparlar, ýazgylary we bahalary bilen.',
   'archive.restore': 'Yzyna getir',
   'archive.restoreAll': 'Ählisini yzyna getir',
+  'archive.messageTerm': 'Habar ugrat',
   'archive.restoreTermTitle': '{term} yzyna getirilsinmi?',
   'archive.restoreTermBody': '{count} topar täzeden işjeň sanawa geçer.',
   'archive.emptyTitle': 'Arhiw boş',
@@ -1243,7 +1249,7 @@ const ru: Record<TranslationKey, string> = {
   'students.note': 'Заметка',
   'students.avgScore': 'Средний балл',
   'students.sessions': 'Занятия',
-  'students.searchPlaceholder': 'Поиск по имени или номеру',
+  'students.searchPlaceholder': 'Имя, номер, номер родителя, школа…',
   'csv.gender': 'Пол',
   'student.gender': 'Пол',
   'students.male': 'Мальчик',
@@ -1520,6 +1526,11 @@ const ru: Record<TranslationKey, string> = {
   'messages.pickChannel': 'Выберите хотя бы один способ',
   'messages.groupHasNoStudents': 'В группе {name} нет учеников',
   'messages.notInAnyGroup': 'Эти ученики не состоят ни в одной группе',
+  'messages.nobodyReachable': 'Ни у кого из выбранных нет номера',
+  'messages.showFinished': 'Показать завершённые семестры',
+  'messages.hideFinished': 'Скрыть завершённые семестры',
+  'messages.sharedNumbers':
+    'Номеров, общих для нескольких учеников: {count}. На каждый номер уйдёт одно сообщение.',
   'messages.placeholderHint':
     'Подстановки заполняются для каждого получателя, поэтому каждый видит своё имя.',
   'messages.noEmailWarning':
@@ -1895,6 +1906,7 @@ const ru: Record<TranslationKey, string> = {
   'archive.openHint': 'Группы, убранные в архив, вместе с журналом и оценками.',
   'archive.restore': 'Вернуть',
   'archive.restoreAll': 'Вернуть все',
+  'archive.messageTerm': 'Написать',
   'archive.restoreTermTitle': 'Вернуть {term}?',
   'archive.restoreTermBody': 'Групп вернётся в активный список: {count}.',
   'archive.emptyTitle': 'Архив пуст',
@@ -2233,7 +2245,7 @@ const en: Record<TranslationKey, string> = {
   'students.note': 'Note',
   'students.avgScore': 'Avg. score',
   'students.sessions': 'Sessions',
-  'students.searchPlaceholder': 'Search by name or number',
+  'students.searchPlaceholder': 'Name, number, parent’s number, school…',
   'csv.gender': 'Gender',
   'student.gender': 'Gender',
   'students.male': 'Boy',
@@ -2510,6 +2522,11 @@ const en: Record<TranslationKey, string> = {
   'messages.pickChannel': 'Pick at least one channel',
   'messages.groupHasNoStudents': '{name} has no students',
   'messages.notInAnyGroup': 'Those students are not in any group',
+  'messages.nobodyReachable': 'Nobody selected has a number on file',
+  'messages.showFinished': 'Show finished terms',
+  'messages.hideFinished': 'Hide finished terms',
+  'messages.sharedNumbers':
+    '{count} numbers belong to more than one student. Each number gets one message.',
   'messages.placeholderHint':
     'Placeholders are filled per recipient, so everyone gets their own name.',
   'messages.noEmailWarning':
@@ -2885,6 +2902,7 @@ const en: Record<TranslationKey, string> = {
   'archive.openHint': 'Courses you have filed away, with their registers and marks.',
   'archive.restore': 'Restore',
   'archive.restoreAll': 'Restore all',
+  'archive.messageTerm': 'Message',
   'archive.restoreTermTitle': 'Restore {term}?',
   'archive.restoreTermBody': '{count} groups go back to the active list.',
   'archive.emptyTitle': 'Nothing archived',

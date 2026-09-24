@@ -16,6 +16,7 @@ import { useT } from '@/i18n/useT';
 import { smsNumber } from '@/lib/contact';
 import { at, countdownTo, longDate, relativeSlot } from '@/lib/date';
 import { nextSessionForGroup, nextSessionOverall, roomLabel } from '@/lib/schedule';
+import { fold, matcherFor } from '@/lib/search';
 import { chosenTerm, compareTerms, termLabel } from '@/lib/term';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body, display, text } from '@/theme/type';
@@ -44,18 +45,26 @@ export default function Home() {
     return () => clearInterval(t);
   }, []);
 
-  const q = query.trim().toLowerCase();
+  const q = query.trim();
 
+  /*
+    The same matcher the students tab uses, rather than a second rule.
+
+    This box used to search names alone, so a teacher who found a student here
+    by their mother's number one day and not the next was not confused — they
+    were right, because the two screens searched different things.
+  */
   const matchedStudents = useMemo(
-    () => (q ? students.filter((s) => s.name.toLowerCase().includes(q)) : []),
+    () => (q ? students.filter(matcherFor(q)) : []),
     [q, students],
   );
 
   const shown = useMemo(() => {
     if (!q) return groups;
     const viaStudent = new Set(matchedStudents.flatMap((s) => s.groupIds));
+    const folded = fold(q);
     return groups.filter(
-      (g) => `${g.name} ${g.subject}`.toLowerCase().includes(q) || viaStudent.has(g.id),
+      (g) => fold(`${g.name} ${g.subject}`).includes(folded) || viaStudent.has(g.id),
     );
   }, [groups, matchedStudents, q]);
 
@@ -332,6 +341,26 @@ export default function Home() {
                         {t('groups.new')}
                       </Text>
                     </Press>
+
+                    {/*
+                      Messaging the whole intake at once.
+
+                      A term is the unit a tutor announces things in — the
+                      timetable has moved, fees are due, the holiday starts
+                      Monday — and saying it course by course is how the eighth
+                      class gets missed. The composer opens with every course in
+                      this term ticked and lets them add others.
+                    */}
+                    {inTerm.length ? (
+                      <Press
+                        onPress={() =>
+                          router.push({ pathname: '/compose', params: { terms: term } })
+                        }
+                        style={styles.termAction}>
+                        <Icon name="chat" size={13} color={color.mutedLight} />
+                        <Text style={styles.termActionLabel}>{t('messages.newMessage')}</Text>
+                      </Press>
+                    ) : null}
 
                     {inTerm.length ? (
                       <Press

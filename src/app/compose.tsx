@@ -33,8 +33,8 @@ import {
   recordDeviceSms,
   sendMessage as apiSendMessage,
 } from '@/data/api';
-import { useGroups, useStore, useStudents, useTemplates } from '@/data/store';
-import type { Audience, Channel } from '@/data/types';
+import { useAllGroups, useStore, useStudents, useTemplates } from '@/data/store';
+import type { Audience, Channel, Group } from '@/data/types';
 import type { TranslationKey } from '@/i18n';
 import { useT } from '@/i18n/useT';
 import {
@@ -51,6 +51,8 @@ import {
   type SmsOutcome,
 } from '@/lib/deviceSms';
 import { PLACEHOLDERS } from '@/lib/messageVars';
+import { planRecipients } from '@/lib/recipients';
+import { compareTerms, termLabel, termOfGroup } from '@/lib/term';
 import { describeError } from '@/lib/errors';
 import { useKeyboardInset } from '@/lib/useKeyboardInset';
 import { builtInTemplates } from '@/lib/templates';
@@ -116,16 +118,26 @@ export default function Compose() {
   const styles = useThemedStyles(makeStyles);
   const params = useLocalSearchParams<{
     group?: string;
+    /**
+     * Terms to open with every course ticked, comma separated.
+     *
+     * How the archive sends a teacher here: "message everybody who was in the
+     * autumn lot" is one term, and it is a question about people rather than
+     * about the eight separate courses they happened to be split across.
+     */
+    terms?: string;
     audience?: Audience;
     students?: string;
     template?: string;
     /** `1` to arrive with the template sheet already open. */
     pick?: string;
+    /** `1` to open with finished terms already showing. */
+    archived?: string;
   }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const groups = useGroups();
+  const allGroups = useAllGroups();
   const students = useStudents();
   const savedTemplates = useTemplates();
   const templateOverrides = useStore((s) => s.templateOverrides);
@@ -147,25 +159,105 @@ export default function Compose() {
     [focusIds, students],
   );
 
+  /** The terms the caller asked to open with, if any. */
+  const askedTerms = useMemo(
+    () => (params.terms ? params.terms.split(',').filter(Boolean) : []),
+    [params.terms],
+  );
+
+  /*
+    Finished terms are off by default and one tap away.
+
+    The picker is the list of who a teacher is teaching, and a year of archived
+    courses at the bottom of it would bury this week's. But messaging a finished
+    class is a real thing — results are ready, the next intake is open, a
+    certificate is waiting — which is why it is a toggle rather than a rule.
+
+    On by default when the caller named a term that has been filed away: the
+    archive links straight here, and opening on a picker with nothing in it
+    would read as the link being broken.
+  */
+  const [showArchived, setShowArchived] = useState(
+    () =>
+      params.archived === '1' ||
+      useStore
+        .getState()
+        .groups.some((g) => g.archivedAt && askedTerms.includes(termOfGroup(g))),
+  );
+
+  /** The courses on offer. Selecting is only ever over these — see `selectedGroups`. */
+  const offered = useMemo(
+    () => (showArchived ? allGroups : allGroups.filter((g) => !g.archivedAt)),
+    [allGroups, showArchived],
+  );
+
+  /**
+   * The picker, in terms.
+   *
+   * A tutor with thirty courses does not think of them as thirty. They think
+   * "the autumn lot", which is what a term is — so the term is the row, and
+   * tapping it takes the whole intake at once. That is the difference between
+   * messaging a term and ticking eight chips and missing the ninth.
+   */
+  const byTerm = useMemo(() => {
+    const buckets = new Map<string, Group[]>();
+    for (const g of offered) {
+      const key = termOfGroup(g);
+      const list = buckets.get(key);
+      if (list) list.push(g);
+      else buckets.set(key, [g]);
+    }
+    return [...buckets.entries()]
+      .sort((a, b) => compareTerms(b[0], a[0]))
+      .map(([term, list]) => ({
+        term,
+        groups: [...list].sort((a, b) => a.name.localeCompare(b.name)),
+        /** Every course in it is filed away, so the heading can say so. */
+        archived: list.every((g) => !!g.archivedAt),
+      }));
+  }, [offered]);
+
   /**
    * `null` until the teacher touches a chip, so the default can follow the data
    * instead of being frozen at mount.
    *
-   * Seeding this from `groups[0]` in a `useState` initialiser looked equivalent
+   * Seeding this from the first course in a `useState` initialiser looked equivalent
    * and was not: the initialiser runs once, and opening the composer before the
    * store has hydrated from Supabase left it holding a key that matches no
    * group. The chips then rendered with nothing selected and the footer read
    * "No group selected" with no way to explain itself.
    */
   const [picked, setPicked] = useState<Record<string, boolean> | null>(null);
-  const selection =
-    picked ??
-    (params.group
-      ? { [params.group]: true }
-      : groups[0]
-        ? { [groups[0].id]: true }
-        : ({} as Record<string, boolean>));
+
+  const fallbackSelection = useMemo(() => {
+    if (askedTerms.length) {
+      const out: Record<string, boolean> = {};
+      for (const g of offered) if (askedTerms.includes(termOfGroup(g))) out[g.id] = true;
+      return out;
+    }
+    if (params.group) return { [params.group]: true };
+    // Never an archived course by accident: arriving with nothing asked for,
+    // the composer opens on something the teacher is actually teaching.
+    const first = offered.find((g) => !g.archivedAt);
+    return first ? { [first.id]: true } : {};
+  }, [askedTerms, params.group, offered]);
+
+  const selection = picked ?? fallbackSelection;
   const toggleGroup = (id: string) => setPicked({ ...selection, [id]: !selection[id] });
+
+  /**
+   * Take or drop a whole term.
+   *
+   * Takes it unless it is already whole, which is the behaviour of every
+   * select-all anybody has used: a term with six of its eight courses ticked
+   * completes rather than empties.
+   */
+  const toggleTerm = (list: Group[]) => {
+    const whole = list.every((g) => selection[g.id]);
+    const next = { ...selection };
+    for (const g of list) next[g.id] = !whole;
+    setPicked(next);
+  };
   const [audience, setAudience] = useState<Audience>(params.audience ?? 'students');
   /*
     Which guardian, when the audience includes them.
@@ -333,18 +425,44 @@ export default function Compose() {
    */
   const viaPhone = deviceSms && channels.sms && hasSupabase;
 
-  const selectedGroups = groups.filter((g) => selection[g.id]);
+  // Over what is on screen, so hiding the finished terms also drops them from
+  // the send. A tick the teacher cannot see is a tick they cannot untick.
+  const selectedGroups = useMemo(
+    () => offered.filter((g) => selection[g.id]),
+    [offered, selection],
+  );
   // From what this phone actually offers, so the server can never be handed an
   // SMS to send on the teacher's behalf.
   const activeChannels = channelsHere.filter((c) => channels[c.key]);
-  const multiplier = audience === 'both' ? 2 : 1;
 
-  const reach = focusIds.length
-    ? focused.length * multiplier
-    : selectedGroups.reduce(
-        (n, g) => n + students.filter((s) => s.groupIds.includes(g.id)).length,
-        0,
-      ) * multiplier;
+  /**
+   * Everybody the message is about — each of them once.
+   *
+   * A student in two of the selected groups, or in two terms of them, is one
+   * student. `filter` over the roster rather than a concatenation of the
+   * groups' rosters is what makes that true by construction.
+   */
+  const targeted = useMemo(
+    () =>
+      focusIds.length
+        ? focused
+        : students.filter((s) => selectedGroups.some((g) => s.groupIds.includes(g.id))),
+    [focusIds.length, focused, students, selectedGroups],
+  );
+
+  /**
+   * How many messages this actually is.
+   *
+   * Counted from the recipient list rather than `students × 2`, so it drops the
+   * students with no number and counts a mother reached on one phone for two of
+   * her children once. The footer used to promise a class of forty and the run
+   * sheet then showed thirty-one.
+   */
+  const plan = useMemo(
+    () => planRecipients({ students: targeted, audience, parents }),
+    [targeted, audience, parents],
+  );
+  const reach = plan.rows.length;
 
   /**
    * Recipients the email channel cannot reach.
@@ -353,10 +471,6 @@ export default function Compose() {
    * before the teacher taps Send rather than after. Email is the channel where
    * this bites: a phone number is required on every student, an address is not.
    */
-  const targeted = focusIds.length
-    ? focused
-    : students.filter((s) => selectedGroups.some((g) => s.groupIds.includes(g.id)));
-
   const noEmail = channels.email
     ? targeted.reduce((n, s) => {
         let missing = 0;
@@ -389,9 +503,15 @@ export default function Compose() {
         ? t('messages.notInAnyGroup')
         : t('messages.noGroupSelected')
       : reach === 0
-        ? selectedGroups.length > 1
-          ? t('messages.groupHasNoStudents', { name: '' }).trim()
-          : t('messages.groupHasNoStudents', { name: selectedGroups[0].name })
+        ? // A roster with people in it and nobody reachable is a different
+          // problem from an empty group, and "this group has no students" sent
+          // teachers looking for students who were sitting right there. What is
+          // missing is the numbers.
+          targeted.length
+          ? t('messages.nobodyReachable')
+          : selectedGroups.length > 1
+            ? t('messages.groupHasNoStudents', { name: '' }).trim()
+            : t('messages.groupHasNoStudents', { name: selectedGroups[0].name })
         : activeChannels.length === 0
           ? t('messages.pickChannel')
           : null;
@@ -757,18 +877,96 @@ export default function Compose() {
               </View>
             </Card>
           ) : (
-            <View style={styles.chipWrap}>
-              {groups.map((g) => (
-                <SelectChip
-                  key={g.id}
-                  label={g.name}
-                  dot={accents[g.accent].dot}
-                  count={students.filter((s) => s.groupIds.includes(g.id)).length}
-                  selected={!!selection[g.id]}
-                  onPress={() => toggleGroup(g.id)}
-                />
-              ))}
-            </View>
+            <>
+              {byTerm.map(({ term, groups: list, archived }) => {
+                const whole = list.every((g) => selection[g.id]);
+                const some = !whole && list.some((g) => selection[g.id]);
+                const ids = new Set(list.map((g) => g.id));
+                const heads = students.filter((st) =>
+                  st.groupIds.some((id) => ids.has(id)),
+                ).length;
+
+                return (
+                  <View key={term} style={styles.termBlock}>
+                    {/*
+                      The heading is the control. A teacher who wants the whole
+                      intake should not have to tick eight chips and then count
+                      them to check they got all eight.
+                    */}
+                    <Press
+                      haptic
+                      onPress={() => toggleTerm(list)}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: whole }}
+                      style={styles.termHead}>
+                      <View
+                        style={[
+                          styles.termBox,
+                          {
+                            backgroundColor: whole ? color.primary : 'transparent',
+                            borderColor: whole || some ? color.primary : color.border,
+                          },
+                        ]}>
+                        {whole ? (
+                          <Icon name="check" size={11} color={color.onDark} strokeWidth={2.6} />
+                        ) : some ? (
+                          <View style={styles.termDash} />
+                        ) : null}
+                      </View>
+                      <Text style={styles.termName} numberOfLines={1}>
+                        {termLabel(term, t)}
+                      </Text>
+                      {archived ? (
+                        <View style={styles.termBadge}>
+                          <Text style={styles.termBadgeLabel}>{t('archive.section')}</Text>
+                        </View>
+                      ) : null}
+                      <Text style={styles.termCount}>{t('students.count', { count: heads })}</Text>
+                    </Press>
+
+                    <View style={[styles.chipWrap, styles.termChips]}>
+                      {list.map((g) => (
+                        <SelectChip
+                          key={g.id}
+                          label={g.name}
+                          dot={accents[g.accent].dot}
+                          count={students.filter((s) => s.groupIds.includes(g.id)).length}
+                          selected={!!selection[g.id]}
+                          onPress={() => toggleGroup(g.id)}
+                        />
+                      ))}
+                    </View>
+                  </View>
+                );
+              })}
+
+              {/*
+                Only where there is something to show. A teacher who has never
+                archived a course is not helped by a switch for the archive.
+              */}
+              {showArchived || allGroups.some((g) => g.archivedAt) ? (
+                <Press
+                  onPress={() => {
+                    // The ticks on the terms about to disappear go with them —
+                    // see `selectedGroups`, which reads off what is on screen.
+                    setShowArchived((on) => !on);
+                  }}
+                  style={styles.archiveToggle}>
+                  <Icon
+                    name="archive"
+                    size={15}
+                    color={showArchived ? color.primaryInk : color.mutedLight}
+                  />
+                  <Text
+                    style={[
+                      styles.archiveToggleLabel,
+                      { color: showArchived ? color.primaryInk : color.mutedLight },
+                    ]}>
+                    {t(showArchived ? 'messages.hideFinished' : 'messages.showFinished')}
+                  </Text>
+                </Press>
+              ) : null}
+            </>
           )}
 
           <Overline style={styles.label}>{t('messages.recipients')}</Overline>
@@ -839,6 +1037,22 @@ export default function Compose() {
             <View style={styles.warn}>
               <Icon name="info" size={18} color={color.warningDeep} />
               <Text style={styles.warnText}>{t('messages.noEmailWarn', { count: noEmail })}</Text>
+            </View>
+          ) : null}
+
+          {/*
+            Why the count is lower than the register.
+
+            Two children on one mother's number is one message, and a teacher
+            who reads "reaches 41" over a roster of 44 is owed the reason before
+            they go looking for the three they think were dropped.
+          */}
+          {plan.merged > 0 ? (
+            <View style={styles.info}>
+              <Icon name="info" size={18} color={color.primary} />
+              <Text style={styles.infoText}>
+                {t('messages.sharedNumbers', { count: plan.merged })}
+              </Text>
             </View>
           ) : null}
 
@@ -1006,6 +1220,49 @@ const makeStyles = ({ color, accents }: Theme) =>
       color: color.primary,
     },
     label: { marginBottom: 10 },
+
+    /* The term picker — a heading that is itself the select-all, then its chips. */
+    termBlock: { marginBottom: 16 },
+    /* `chipWrap`'s own gap below would stack with the block's. */
+    termChips: { marginBottom: 0 },
+    termHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      paddingVertical: 7,
+      paddingHorizontal: 2,
+    },
+    termBox: {
+      width: 19,
+      height: 19,
+      borderRadius: 6,
+      borderWidth: 1.5,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    /* Part of a term taken. A dash rather than a tick, because a tick here
+       would say the whole intake is going and it is not. */
+    termDash: { width: 9, height: 2, borderRadius: 1, backgroundColor: color.primary },
+    termName: { flexShrink: 1, fontFamily: body[700], fontSize: 13.5, color: color.inkSoft },
+    termBadge: {
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: radius.xs,
+      backgroundColor: color.fill,
+    },
+    termBadgeLabel: { fontFamily: body[700], fontSize: 10, color: color.mutedLight },
+    termCount: { marginLeft: 'auto', fontFamily: body[400], fontSize: 12, color: color.mutedLight },
+
+    archiveToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      alignSelf: 'flex-start',
+      paddingVertical: 7,
+      paddingHorizontal: 2,
+      marginBottom: 12,
+    },
+    archiveToggleLabel: { fontFamily: body[700], fontSize: 12.5 },
 
     chipWrap: {
       flexDirection: 'row',

@@ -82,12 +82,31 @@ export default function Archive() {
         {terms.map(({ term, groups }) => (
           <View key={term} style={styles.term}>
             <View style={styles.termHead}>
-              <Text style={styles.termName}>{termLabel(term, t)}</Text>
+              <Text style={styles.termName} numberOfLines={1}>
+                {termLabel(term, t)}
+              </Text>
+              {/*
+                A finished term is still a class of people.
+
+                Results come out, the next intake opens, a certificate is ready
+                — and the teacher's list of who was in it is exactly this page.
+                Sending them here with the term already ticked saves finding
+                eight archived courses one at a time; the composer then lets
+                them add other terms, finished or running, to the same send.
+              */}
+              <Press
+                onPress={() =>
+                  router.push({ pathname: '/compose', params: { terms: term, archived: '1' } })
+                }
+                style={styles.termAction}>
+                <Icon name="chat" size={13} color={color.primaryInk} />
+                <Text style={styles.termActionLabel}>{t('archive.messageTerm')}</Text>
+              </Press>
               <Press
                 onPress={() => void askRestoreTerm(term, groups.length)}
-                style={styles.restoreAll}>
+                style={styles.termAction}>
                 <Icon name="refresh" size={13} color={color.primaryInk} />
-                <Text style={styles.restoreAllLabel}>{t('archive.restoreAll')}</Text>
+                <Text style={styles.termActionLabel}>{t('archive.restoreAll')}</Text>
               </Press>
             </View>
 
@@ -176,11 +195,12 @@ const makeStyles = ({ color }: Theme) =>
     },
     termName: {
       flex: 1,
+      minWidth: 0,
       fontFamily: body[700],
       fontSize: 13.5,
       color: color.inkSoft,
     },
-    restoreAll: {
+    termAction: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
@@ -189,7 +209,7 @@ const makeStyles = ({ color }: Theme) =>
       borderRadius: radius.xs + 2,
       backgroundColor: color.primaryTint,
     },
-    restoreAllLabel: { fontFamily: body[700], fontSize: 11.5, color: color.primaryInk },
+    termActionLabel: { fontFamily: body[700], fontSize: 11.5, color: color.primaryInk },
 
     card: { paddingVertical: 2 },
     row: { flexDirection: 'row', alignItems: 'center' },

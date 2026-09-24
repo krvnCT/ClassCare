@@ -15,7 +15,7 @@ import { AlphabetIndex } from '@/components/AlphabetIndex';
 import { Icon } from '@/components/Icon';
 import { Screen, useTabInset } from '@/components/layout';
 import { Avatar, EmptyState, IconButton, Press, SelectChip } from '@/components/ui';
-import { useGroups, useStudents } from '@/data/store';
+import { useAllGroups, useGroups, useStudents } from '@/data/store';
 import { refreshAll } from '@/data/sync';
 import type { Gender, Student } from '@/data/types';
 import { useT } from '@/i18n/useT';
@@ -76,6 +76,19 @@ export default function Students() {
 
   const students = useStudents();
   const groups = useGroups();
+  /*
+    The teaching list and the whole list are both needed, and they answer
+    different questions.
+
+    `groups` is what is being taught now — the headline count, the tags on a
+    row. `allGroups` is the student's history, and three things here are about
+    history rather than this week: which terms exist, which of them a student
+    was in, and what level they are at. `levelOf` counts *finished* courses and
+    an archived course is finished by definition, so feeding it the teaching
+    list alone made the students tab read a level lower than the student's own
+    page did for anybody whose courses had been filed away.
+  */
+  const allGroups = useAllGroups();
   const [query, setQuery] = useState('');
 
   const [gender, setGender] = useState<GenderFilter>('any');
@@ -158,19 +171,27 @@ export default function Students() {
     [thisTerm],
   );
 
-  /** Terms the teacher actually has, newest first. No term, no chip. */
+  /**
+   * Terms the teacher actually has, newest first. No term, no chip.
+   *
+   * Finished terms included: "who was in the autumn lot" is a question about a
+   * term that is over, and it is the one asked when results go out or the next
+   * intake opens. Without the archived groups the filter offered this term and
+   * nothing else, and a student whose courses had all ended matched no term at
+   * all.
+   */
   const terms = useMemo(() => {
     const seen = new Set<string>();
-    for (const g of groups) {
+    for (const g of allGroups) {
       const key = termFor(g);
       if (key) seen.add(key);
     }
     return [...seen].sort((a, b) => compareTerms(b, a));
-  }, [groups, termFor]);
+  }, [allGroups, termFor]);
 
   /** Which terms each student belongs to, through their groups. */
   const termsByStudent = useMemo(() => {
-    const groupTerm = new Map(groups.map((g) => [g.id, termFor(g)]));
+    const groupTerm = new Map(allGroups.map((g) => [g.id, termFor(g)]));
     const out = new Map<string, Set<string>>();
     for (const s of students) {
       const set = new Set<string>();
@@ -181,7 +202,26 @@ export default function Students() {
       out.set(s.id, set);
     }
     return out;
-  }, [students, groups, termFor]);
+  }, [students, allGroups, termFor]);
+
+  /**
+   * The group names each student is in, as one string for the search.
+   *
+   * So "matematika" finds the students in the maths class, which is how a
+   * teacher looks for a class they have not got the name of exactly right.
+   */
+  const groupNamesByStudent = useMemo(() => {
+    const nameById = new Map(allGroups.map((g) => [g.id, `${g.name} ${g.subject}`]));
+    return new Map(
+      students.map((s) => [
+        s.id,
+        s.groupIds
+          .map((id) => nameById.get(id))
+          .filter(Boolean)
+          .join(' '),
+      ]),
+    );
+  }, [students, allGroups]);
 
   /** Schools the teacher actually has. Shared with the sort — see `schoolsOf`. */
   const schools = useMemo(() => schoolsOf(students), [students]);
@@ -195,8 +235,8 @@ export default function Students() {
    */
   const levelByStudent = useMemo(() => {
     const today = toKey(new Date());
-    return new Map(students.map((s) => [s.id, levelOf(s, groups, today)]));
-  }, [students, groups]);
+    return new Map(students.map((s) => [s.id, levelOf(s, allGroups, today)]));
+  }, [students, allGroups]);
 
   /** Levels anybody is actually at, low to high. No students, no chip. */
   const levels = useMemo(
@@ -218,6 +258,7 @@ export default function Students() {
         sort,
         termsByStudent,
         levelByStudent,
+        groupNamesByStudent,
         t,
       }),
     [
@@ -232,6 +273,7 @@ export default function Students() {
       sort,
       termsByStudent,
       levelByStudent,
+      groupNamesByStudent,
       t,
     ],
   );
