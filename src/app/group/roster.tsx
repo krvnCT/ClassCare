@@ -22,6 +22,7 @@ import { useT } from '@/i18n/useT';
 import { Avatar, Button, EmptyState, Press } from '@/components/ui';
 import { useGroup, useStore, useStudents } from '@/data/store';
 import type { Student } from '@/data/types';
+import { matcherFor } from '@/lib/search';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body, text } from '@/theme/type';
 
@@ -45,12 +46,11 @@ export default function GroupRoster() {
   );
 
   const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const list = q
-      ? students.filter(
-          (s) => s.name.toLowerCase().includes(q) || s.phone.replace(/\s/g, '').includes(q),
-        )
-      : students;
+    const q = query.trim();
+    // The shared matcher — names with the accents folded off, both parents'
+    // numbers, the school. Adding a sibling to a group by typing the number
+    // their mother rings from is the point of it.
+    const list = q ? students.filter(matcherFor(q)) : students;
 
     /*
       Members first, ordered by the *saved* roster rather than by the ticks.

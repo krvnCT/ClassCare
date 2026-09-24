@@ -14,6 +14,7 @@ import type { Gender, Student } from '@/data/types';
 import type { TranslationKey } from '@/i18n';
 import { ageFrom } from '@/lib/date';
 import { genderOf } from '@/lib/names';
+import { matcherFor } from '@/lib/search';
 
 export type Section = { title: string; data: Student[] };
 
@@ -141,6 +142,7 @@ export function buildSections({
   sort,
   termsByStudent,
   levelByStudent,
+  groupNamesByStudent,
   t,
 }: {
   students: Student[];
@@ -154,24 +156,24 @@ export function buildSections({
   sort: SortMode;
   termsByStudent: Map<string, Set<string>>;
   levelByStudent: Map<string, number>;
+  /**
+   * The names of the groups each student is in, for the search to look at.
+   *
+   * Optional because the rule belongs to the screen that has the groups, not
+   * to this file — and every caller that has them should pass them: "show me
+   * the maths lot" is a search teachers make constantly.
+   */
+  groupNamesByStudent?: Map<string, string>;
   t: Translate;
 }): Section[] {
-  const q = query.trim().toLowerCase();
-  const digits = q.replace(/\s/g, '');
   const band = AGE_BANDS.find((b) => b.key === age);
+  // Parsed once for the whole list — see `matcherFor`. Searches the parents'
+  // numbers, the schools, the addresses and the names with their accents
+  // folded away, which is how these names are actually typed.
+  const hit = matcherFor(query, groupNamesByStudent && ((s) => groupNamesByStudent.get(s.id)));
 
   const matches = students.filter((s) => {
-    if (q) {
-      // The school is searched too, so a teacher who remembers where a child
-      // goes but not how their surname is spelled can still find them — which
-      // is the commoner of the two by some way.
-      const hit =
-        s.name.toLowerCase().includes(q) ||
-        s.phone.replace(/\s/g, '').includes(digits) ||
-        (s.address ?? '').toLowerCase().includes(q) ||
-        (s.school ?? '').toLowerCase().includes(q);
-      if (!hit) return false;
-    }
+    if (!hit(s)) return false;
 
     /*
       "Not recorded" is its own answer, not a third gender: it selects the

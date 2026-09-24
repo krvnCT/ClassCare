@@ -230,18 +230,6 @@ check(
   `${bySchool.length} sections: ${bySchool.map(([tt]) => tt).join(', ')}`,
 );
 
-/* ----------------------------------------------------------------- search */
-
-describe('search');
-const searchable = [
-  student({ name: 'Aman Berdiýew', phone: '65 12 34 56', school: 'Mekdep 20' }),
-  student({ name: 'Baýram Myradow', phone: '61 99 88 77', address: 'Mary, Bitarap 3' }),
-];
-eq('by name', names(run(searchable, { query: 'berdi' })), ['Aman Berdiýew']);
-eq('by phone, ignoring spacing', names(run(searchable, { query: '65123456' })), ['Aman Berdiýew']);
-eq('by address', names(run(searchable, { query: 'bitarap' })), ['Baýram Myradow']);
-eq('by school', names(run(searchable, { query: 'mekdep 20' })), ['Aman Berdiýew']);
-
 /* -------------------------------------------------------- age, and gender */
 
 describe('age bands need a birth date');
@@ -288,6 +276,82 @@ eq(
   'and an age band on top',
   names(run(mixed, { school: schoolKey('Mekdep 20'), missing: 'phone', age: 'under10' })),
   [],
+);
+
+/* ----------------------------------------------------------------- Search */
+
+describe('the search box');
+const searchable = [
+  student({
+    name: 'Aýgül Berdiýewa',
+    phone: '+993 65 111111',
+    parentName: 'Ogulgerek',
+    parentPhone: '65 22 33 44',
+    school: 'Mekdep 20',
+    address: 'Aşgabat, Görogly 12',
+  }),
+  student({
+    name: 'Serdar Myradow',
+    phone: '65999999',
+    parent2Phone: '+993 65 77 88 99',
+    school: 'Mekdep 21',
+  }),
+  student({ name: 'John Smith', phone: '65000001', school: 'Mekdep 20' }),
+];
+const found = (query, over = {}) => names(run(searchable, { query, ...over }));
+
+eq('a name', found('berdi'), ['Aýgül Berdiýewa']);
+// The accented letters are the hard ones to type, so nobody types them.
+eq('the same name with the accents left off', found('aygul'), ['Aýgül Berdiýewa']);
+eq('and with them typed', found('aýgül'), ['Aýgül Berdiýewa']);
+// The point of the whole exercise: an unknown number ringing the teacher.
+eq('a mother’s number, as written on the record', found('65 22 33 44'), ['Aýgül Berdiýewa']);
+eq('a mother’s number, run together', found('65223344'), ['Aýgül Berdiýewa']);
+// Stored with the country code, typed without it — and the other way round.
+eq('a father’s number, typed the short way', found('65778899'), ['Serdar Myradow']);
+eq('and the long way', found('+993 65 22 33 44'), ['Aýgül Berdiýewa']);
+// Siblings. Both are found, which is the honest answer to "whose number is
+// this" — and the case the send has to reduce to one message. See
+// `planRecipients` and tools/test-recipients.js.
+eq(
+  'a number two children share finds both',
+  names(
+    run(
+      [
+        student({ name: 'Elder', parentPhone: '65223344' }),
+        student({ name: 'Younger', parentPhone: '+99365223344' }),
+      ],
+      { query: '65223344' },
+    ),
+  ),
+  ['Elder', 'Younger'],
+);
+eq('the student’s own number still works', found('65999999'), ['Serdar Myradow']);
+eq('a parent’s name', found('ogulgerek'), ['Aýgül Berdiýewa']);
+eq('a school', found('mekdep 20'), ['Aýgül Berdiýewa', 'John Smith']);
+eq('an address', found('gorogly'), ['Aýgül Berdiýewa']);
+// Two words, each in a different field. The old search could not do this.
+eq('two words across two fields', found('aygul mekdep'), ['Aýgül Berdiýewa']);
+eq('every word has to hit something', found('aygul mekdep 21'), []);
+eq('case is ignored', found('BERDI'), ['Aýgül Berdiýewa']);
+eq('spaces around the query are ignored', found('   serdar  '), ['Serdar Myradow']);
+eq('nothing matching finds nobody', found('zzzz'), []);
+eq('an empty query keeps everybody', found('').length, 3);
+
+// Group names come from the screen, not the record — see `groupNamesByStudent`.
+eq(
+  'a group name, when the screen supplies them',
+  found('matematika', {
+    groupNamesByStudent: new Map([[searchable[1].id, 'Matematika 9-njy synp']]),
+  }),
+  ['Serdar Myradow'],
+);
+
+// Search runs before the filters, not instead of them.
+eq(
+  'the search and a filter together',
+  found('mekdep 20', { missing: 'parent' }),
+  ['John Smith'],
 );
 
 /* -------------------------------------------------------------- Empty set */
