@@ -13,17 +13,25 @@ import java.security.MessageDigest
  * file. Copy the module, do not retype the protocol.
  *
  * ```
- *  student -> teacher   "CCB1"                    4 bytes, ASCII
+ *  student -> teacher   "BEAM2"                   5 bytes, ASCII
  *                       u32 len + UTF-8 token     the secret from the QR
  *
- *  teacher -> student   u8  status                0 accept, 1 wrong token
+ *  teacher -> student   u8  status                0 accept, 1 wrong token,
+ *                                                 2 the two apps disagree
  *                       u32 len + UTF-8 manifest  JSON, the assignment
  *                       per file, in manifest order:
  *                         u64 size
  *                         exactly `size` bytes
+ *                         u32 crc32               of those bytes
  * ```
  *
- * ## Two decisions worth knowing
+ * Note this is the *socket* version, and it is not the `CCB1:` on the front of
+ * the QR payload. They version separately because they change for different
+ * reasons: the QR is a format two apps read, and this is a conversation two
+ * apps have. Naming them differently is cheaper than explaining, every time,
+ * why one went to 2 and the other did not.
+ *
+ * ## Three decisions worth knowing
  *
  * **The size in the frame is authoritative; the size in the manifest is not.**
  * The manifest is built in JavaScript from what the file picker reported, and
@@ -38,15 +46,38 @@ import java.security.MessageDigest
  * up, and `ByteArray(that)` is then an out-of-memory crash driven by a stranger
  * on the network. The caps below are what stands between the two.
  *
+ * **The checksum is not about attackers, it is about truncation.** TCP carries
+ * a 16-bit checksum, which is one missed corruption in every 65,000 bad
+ * segments — fine for a web page, not fine for a worksheet a student cannot
+ * tell is broken until they open it in front of the class. CRC32 over each
+ * file costs nothing next to the Wi-Fi it arrived over, and turns "this PDF
+ * will not open" into an error the app can name and retry.
+ *
  * Big-endian throughout, which is what `DataOutputStream` writes and what every
  * other language calls network byte order.
  */
 object Wire {
-  /** Format marker. A future version changes the digit; old apps say so. */
-  val MAGIC = byteArrayOf('C'.code.toByte(), 'C'.code.toByte(), 'B'.code.toByte(), '1'.code.toByte())
+  /**
+   * Format marker. A future version changes the digit; old apps say so.
+   *
+   * Five bytes rather than four because the previous version was four, and a
+   * length that differs is a mismatch the reader notices immediately rather
+   * than one it discovers by misparsing the next field.
+   */
+  val MAGIC = "BEAM2".toByteArray(Charsets.US_ASCII)
 
   const val STATUS_OK = 0
   const val STATUS_BAD_TOKEN = 1
+
+  /**
+   * The two apps were built from different versions of this file.
+   *
+   * Worth its own status rather than hanging up: the two apps ship separately
+   * and a student who updated one and not the other otherwise sees a transfer
+   * that fails for no stated reason. This lets the screen say "update the other
+   * app", which is the only thing that will help.
+   */
+  const val STATUS_BAD_VERSION = 2
 
   /** 64 KB: comfortably above the socket buffer, far below anything worth worrying about. */
   const val CHUNK = 64 * 1024

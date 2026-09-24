@@ -19,12 +19,19 @@ import java.util.concurrent.Executors
  *
  * ## The shape of it
  *
- * The teacher's phone becomes a Wi-Fi access point ([WifiDirectHost]) and
- * serves the assignment over a plain socket ([BeamServer]). The QR on their
- * screen carries the network name, the password, the port and a one-use token —
- * everything a student's phone needs to join and ask, and nothing else. The
- * student's phone joins that network ([WifiJoin]) and pulls the files
- * ([BeamClient]).
+ * The teacher's phone serves the assignment over a plain socket ([BeamServer])
+ * and shows a QR describing how to reach it. The student's phone reads that,
+ * gets onto the right network if it is not already ([WifiJoin]), and pulls the
+ * files ([BeamClient]).
+ *
+ * Which network is the interesting part, and it is decided per share — see
+ * `Function("route")`. A hotspot the teacher already has running is used as it
+ * stands; otherwise the phone becomes an access point of its own
+ * ([WifiDirectHost]); failing that, the Wi-Fi they are both joined to
+ * ([LocalNet]). The first version had only the middle one, and the commonest
+ * reason it failed was the teacher's hotspot holding the interface it needed —
+ * which is to say it refused to work in the one situation where the class was
+ * already connected to the teacher's phone.
  *
  * No URL. No server anywhere. Nothing leaves the room. On a filtered connection
  * in Turkmenistan that is not a nice-to-have, it is the difference between a
@@ -72,14 +79,37 @@ class BeamModule : Module() {
     }
 
     /**
-     * What would stop a share right now: "unsupported", "wifiOff",
-     * "hotspotOn", "locationOff", or null.
+     * How the next share would reach the class: "hotspot", "direct", "lan", or
+     * null when no route is open.
      *
-     * Asked before starting rather than discovered by waiting. Each of these
-     * used to spend twenty seconds becoming a timeout, and a timeout is the one
-     * error message that tells a teacher nothing about what to do next.
+     * The ladder, in order, and the order is the whole design:
+     *
+     *  1. **The phone's own hotspot**, if it is running. The class is already
+     *     connected to it, it needs no permission, no Location Services and no
+     *     group to come up — and it is precisely the case the app used to
+     *     refuse outright, because a running hotspot holds the interface
+     *     Wi-Fi Direct wants.
+     *  2. **A Wi-Fi Direct group** of our own. The default: it needs no router
+     *     and has nobody's client-isolation rules on it.
+     *  3. **The Wi-Fi the phone is joined to**, last, because school and café
+     *     access points very often block phone-to-phone traffic and do it
+     *     silently.
      */
-    Function("blocker") { WifiDirectHost(context).blocker() }
+    Function("route") { routeNow() }
+
+    /**
+     * What would stop a share right now: "unsupported", "wifiOff",
+     * "locationOff", or null.
+     *
+     * Null whenever *any* route is open — so this is now only ever the answer
+     * when there is no network to be had at all. Asked before starting rather
+     * than discovered by waiting: each of these used to spend twenty seconds
+     * becoming a timeout, and a timeout is the one error message that tells a
+     * teacher nothing about what to do next.
+     */
+    Function("blocker") {
+      if (routeNow() != null) null else WifiDirectHost(context).blocker() ?: "unsupported"
+    }
 
     /** False below Android 10: the student has to join the network by hand. */
     Function("canJoinAutomatically") { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }
@@ -97,41 +127,64 @@ class BeamModule : Module() {
     AsyncFunction("startHostAsync") { manifest: String, files: List<FileArg>, token: String, promise: Promise ->
       stopHost()
 
+      val outgoing = files.map { Outgoing(it.uri, it.name, it.mime) }
+      val net = LocalNet(context)
+
+      // 1. The hotspot. Nothing to bring up, nothing to ask for, and the class
+      //    is already on it.
+      val hotspot = net.hotspot()
+      if (hotspot != null) {
+        serve(manifest, outgoing, token, null, null, hotspot.address, "hotspot", promise)
+        return@AsyncFunction
+      }
+
+      // 2. A group of our own — unless something stops it, in which case fall
+      //    to the joined Wi-Fi before reporting a failure. A room with working
+      //    Wi-Fi does not need to hear about Location Services.
       val directHost = WifiDirectHost(context).also { host = it }
-      when (directHost.blocker()) {
-        "unsupported" -> throw BeamUnavailableException()
-        "wifiOff" -> throw BeamWifiOffException()
-        "hotspotOn" -> throw BeamHotspotOnException()
-        "locationOff" -> throw BeamLocationOffException()
+      val blocked = directHost.blocker()
+      if (blocked != null) {
+        val lan = net.lan()
+        if (lan != null) {
+          host = null
+          serve(manifest, outgoing, token, null, null, lan.address, "lan", promise)
+          return@AsyncFunction
+        }
+        when (blocked) {
+          "wifiOff" -> throw BeamWifiOffException()
+          "locationOff" -> throw BeamLocationOffException()
+          else -> throw BeamUnavailableException()
+        }
       }
 
       directHost.start(GROUP_TIMEOUT_MS) { result ->
-        val group = result.getOrElse {
-          stopHost()
-          promise.reject(it.asCoded())
-          return@start
-        }
-        try {
-          val beam = BeamServer(
-            resolver = context.contentResolver,
-            manifest = manifest,
-            files = files.map { Outgoing(it.uri, it.name, it.mime) },
-            token = token,
-          ) { event -> sendEvent("onBeamPeer", event) }
-          server = beam
-          val port = beam.start()
-          promise.resolve(
-            mapOf(
-              "ssid" to group.ssid,
-              "passphrase" to group.passphrase,
-              "host" to group.host,
-              "port" to port,
-            ),
-          )
-        } catch (e: Exception) {
-          stopHost()
-          promise.reject(e.asCoded())
-        }
+        result.fold(
+          onSuccess = { group ->
+            serve(
+              manifest, outgoing, token,
+              group.ssid, group.passphrase, group.host, "direct", promise,
+            )
+          },
+          onFailure = { failure ->
+            /*
+              The group did not come up. Before reporting that, look again for
+              a network that already exists — the state of the phone can have
+              changed in the thirty seconds we spent waiting, and a teacher who
+              switched their hotspot on while watching the spinner should get a
+              transfer rather than the error they were trying to fix.
+            */
+            val fallback = net.existing()
+            if (fallback == null) {
+              stopHost()
+              promise.reject(failure.asCoded())
+              return@fold
+            }
+            host?.stop()
+            host = null
+            val route = if (fallback.route == Route.HOTSPOT) "hotspot" else "lan"
+            serve(manifest, outgoing, token, null, null, fallback.address, route, promise)
+          },
+        )
       }
     }
 
@@ -208,6 +261,58 @@ class BeamModule : Module() {
     }
   }
 
+  /**
+   * Bind the socket and answer the promise.
+   *
+   * Shared by all three routes, because from here down they are the same thing:
+   * a server on a port, and a QR describing how to reach it. `ssid` and
+   * `passphrase` are only present on the Direct route — on the other two the
+   * student is already on the network, or joins it the way they always do, and
+   * putting a password in the code for a network they are on would be noise.
+   */
+  private fun serve(
+    manifest: String,
+    files: List<Outgoing>,
+    token: String,
+    ssid: String?,
+    passphrase: String?,
+    address: String,
+    route: String,
+    promise: Promise,
+  ) {
+    try {
+      val beam = BeamServer(
+        resolver = context.contentResolver,
+        manifest = manifest,
+        files = files,
+        token = token,
+      ) { event -> sendEvent("onBeamPeer", event) }
+      server = beam
+      val port = beam.start()
+      promise.resolve(
+        mapOf(
+          "ssid" to (ssid ?: ""),
+          "passphrase" to (passphrase ?: ""),
+          "host" to address,
+          "port" to port,
+          "route" to route,
+        ),
+      )
+    } catch (e: Exception) {
+      stopHost()
+      promise.reject(e.asCoded())
+    }
+  }
+
+  /** See `Function("route")` — the ladder, asked without starting anything. */
+  private fun routeNow(): String? {
+    val net = LocalNet(context)
+    if (net.hotspot() != null) return "hotspot"
+    if (WifiDirectHost(context).blocker() == null) return "direct"
+    if (net.lan() != null) return "lan"
+    return null
+  }
+
   private fun stopHost() {
     server?.stop()
     server = null
@@ -232,8 +337,22 @@ class BeamModule : Module() {
       arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
-  private fun Throwable.asCoded(): CodedException =
-    this as? CodedException ?: BeamFailedException(message ?: javaClass.simpleName)
+  /**
+   * Turn what the transfer threw into something the screen can name.
+   *
+   * The socket code throws plain `IOException`s on purpose — it knows about
+   * bytes, not about translated strings — so the mapping to a code the app can
+   * branch on lives here. Without it every one of these reached JavaScript as
+   * `ERR_BEAM` plus an English sentence, which is not something a Turkmen
+   * student's phone can show them.
+   */
+  private fun Throwable.asCoded(): CodedException = when (this) {
+    is CodedException -> this
+    is BadTokenException -> BeamBadTokenException()
+    is CorruptFileException -> BeamCorruptException(message ?: "")
+    is VersionMismatchException -> BeamVersionException()
+    else -> BeamFailedException(message ?: javaClass.simpleName)
+  }
 
   companion object {
     /**
@@ -296,20 +415,6 @@ class BeamWifiOffException : CodedException(
  * Android will not bring up a Wi-Fi Direct group while the setting is off, and
  * it does so by quietly never producing one rather than by failing.
  */
-/**
- * The phone's own hotspot is running.
- *
- * A Wi-Fi chipset hands out a fixed, small number of interfaces, and the
- * hotspot is holding the one Wi-Fi Direct needs. Observed on a Xiaomi running
- * Android 16, where it presented as a silent timeout with every setting and
- * permission correct.
- */
-class BeamHotspotOnException : CodedException(
-  "ERR_BEAM_HOTSPOT",
-  "The phone's hotspot is on.",
-  null,
-)
-
 class BeamLocationOffException : CodedException(
   "ERR_BEAM_LOCATION_OFF",
   "Location Services is switched off.",
@@ -317,6 +422,33 @@ class BeamLocationOffException : CodedException(
 )
 
 class BeamJoinException(reason: String) : CodedException("ERR_BEAM_JOIN", reason, null)
+
+/** The code was for a different transfer — usually a photo of yesterday's. */
+class BeamBadTokenException : CodedException(
+  "ERR_BEAM_TOKEN",
+  "This code is not for this transfer.",
+  null,
+)
+
+/**
+ * A file arrived with a checksum that does not match.
+ *
+ * Its own code because the remedy is its own: stand closer and scan again.
+ * Reported rather than saved — see `BeamClient`, which throws the partial file
+ * away before this is raised.
+ */
+class BeamCorruptException(name: String) : CodedException(
+  "ERR_BEAM_CORRUPT",
+  if (name.isEmpty()) "A file did not arrive intact." else name,
+  null,
+)
+
+/** The two apps were built from different versions of the protocol. */
+class BeamVersionException : CodedException(
+  "ERR_BEAM_VERSION",
+  "The two apps are different versions.",
+  null,
+)
 
 class BeamManualJoinException : CodedException(
   "ERR_BEAM_JOIN_MANUAL",

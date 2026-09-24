@@ -14,8 +14,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import androidx.annotation.RequiresApi
 import kotlin.random.Random
 
@@ -81,62 +79,18 @@ class WifiDirectHost(context: Context) {
     if (manager == null) return "unsupported"
     val wifi = app.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
     if (wifi?.isWifiEnabled != true) return "wifiOff"
-    if (hotspotOn()) return "hotspotOn"
+    /*
+      The hotspot is not checked here any more, and that is the point.
+
+      A running hotspot holds the AP interface Wi-Fi Direct needs, so this
+      route genuinely cannot work while it is on — but it is no longer a
+      failure, because the hotspot *is* a network and the class is already on
+      it. `LocalNet` finds it and `BeamModule` serves over it before this is
+      ever asked. What is left here is only what blocks the Direct route
+      itself.
+    */
     if (!locationOn()) return "locationOff"
     return null
-  }
-
-  /**
-   * Whether the phone's own hotspot is running.
-   *
-   * This is the one that actually happened, on a Xiaomi running Android 16, and
-   * nothing in the app or the framework said so. A Wi-Fi chipset hands out a
-   * fixed, small number of interfaces; with the hotspot holding the AP slot
-   * there is none left for Wi-Fi Direct. The system log says
-   * `bestIfaceCreationProposal is null` and then simply never brings `p2p0` up —
-   * `createGroup` reports success, no callback ever comes, and the app times
-   * out on a phone where Wi-Fi, Location and the permission are all fine.
-   *
-   * Read off the interface list rather than asked. `isWifiApEnabled` has been
-   * hidden from apps since API 26 and reflecting at it is blocked outright now;
-   * an interface called `ap0` that is up and holding an address is the same
-   * fact, needs no permission, and cannot be taken away.
-   *
-   * `p2p0` is excluded by name: that is the interface *we* bring up, and
-   * matching it would make the check refuse the thing it is guarding.
-   */
-  private fun hotspotOn(): Boolean {
-    val interfaces = runCatching { NetworkInterface.getNetworkInterfaces()?.toList() }
-      .getOrNull() ?: return false
-
-    for (iface in interfaces) {
-      /*
-        Guarded one at a time, not around the whole loop.
-
-        `isUp` and `getInetAddresses` throw `SocketException` for some virtual
-        interfaces, and this phone carries about forty of them — ccmni0 to
-        ccmni20, tunl0, gre0, ip6tnl0. Wrapping the whole scan meant the first
-        one to throw aborted it and the answer came back "no hotspot", which is
-        exactly the check failing silently at the job it exists for.
-      */
-      val hit = runCatching {
-        val name = iface.name?.lowercase() ?: return@runCatching false
-        // `p2p` first: that is the interface we bring up ourselves, and
-        // matching it would make this refuse the very thing it guards.
-        if (name.startsWith("p2p")) return@runCatching false
-        val looksLikeAp =
-          name.startsWith("ap") || name.startsWith("softap") ||
-            name == "wlan1" || name == "swlan0"
-        if (!looksLikeAp || !iface.isUp) return@runCatching false
-        iface.inetAddresses.toList().any { !it.isLoopbackAddress && it is Inet4Address }
-      }.getOrDefault(false)
-
-      if (hit) {
-        note("hotspot is up on ${iface.name}")
-        return true
-      }
-    }
-    return false
   }
 
   private fun locationOn(): Boolean {

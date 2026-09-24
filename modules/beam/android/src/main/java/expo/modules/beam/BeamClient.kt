@@ -8,6 +8,7 @@ import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.zip.CRC32
 import javax.net.SocketFactory
 
 /** One file as it landed on the student's phone. */
@@ -58,6 +59,7 @@ object BeamClient {
 
       val status = input.readUnsignedByte()
       if (status == Wire.STATUS_BAD_TOKEN) throw BadTokenException()
+      if (status == Wire.STATUS_BAD_VERSION) throw VersionMismatchException()
       if (status != Wire.STATUS_OK) throw IOException("Unexpected status $status")
 
       val manifest = Wire.readText(input, Wire.MAX_MANIFEST)
@@ -79,6 +81,7 @@ object BeamClient {
           val partial = File(target.parentFile, "${target.name}.part")
           partials.add(partial to target)
 
+          val crc = CRC32()
           BufferedOutputStream(partial.outputStream(), Wire.CHUNK).use { sink ->
             val buffer = ByteArray(Wire.CHUNK)
             var got = 0L
@@ -88,6 +91,7 @@ object BeamClient {
               val read = input.read(buffer, 0, want)
               if (read < 0) throw IOException("Connection closed with ${size - got} bytes to go")
               sink.write(buffer, 0, read)
+              crc.update(buffer, 0, read)
               got += read
               if (got - lastReport >= 256 * 1024 || got == size) {
                 lastReport = got
@@ -95,6 +99,19 @@ object BeamClient {
               }
             }
           }
+
+          /*
+            Checked before the file is given a real name.
+
+            A worksheet that arrived corrupt is worse than one that did not
+            arrive: the student has something on their phone, it looks
+            finished, and they find out it is broken when they try to open it —
+            usually at home, with nobody to ask. The `.part` file is thrown
+            away by the `catch` below, so a failure here leaves nothing.
+          */
+          val expected = input.readInt()
+          if (crc.value.toInt() != expected) throw CorruptFileException(names[index])
+
           landed.add(Received(target.absolutePath, target.name, size))
         }
 
@@ -158,3 +175,15 @@ object BeamClient {
 }
 
 class BadTokenException : IOException("This code is not for this transfer")
+
+/**
+ * The file arrived damaged.
+ *
+ * Distinct from a dropped connection, and the distinction is the teacher's:
+ * a drop is "stand closer and scan again", corruption on a link this short is
+ * usually a sign the file itself could not be read on the far side.
+ */
+class CorruptFileException(name: String) : IOException("$name did not arrive intact")
+
+/** The two apps were built from different versions of the protocol. */
+class VersionMismatchException : IOException("The other app is a different version")

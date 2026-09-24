@@ -8,11 +8,20 @@
  *
  * ## What actually happens
  *
- * The teacher's phone creates a Wi-Fi Direct group — a real WPA2 access point,
- * needing no router, no internet and nobody's permission — and starts a socket
- * server on it. The QR carries the network name, its password, the port, and a
- * fresh token. A student's phone reads that, joins the network, and pulls the
- * files straight off the teacher's phone.
+ * The teacher's phone starts a socket server and shows a QR describing how to
+ * reach it. Which network that is over is decided at the moment of sharing, and
+ * there are three answers — see the native `route`:
+ *
+ *  - **The teacher's hotspot**, if it is already on. The class is on it, so the
+ *    code carries only an address and a token. Nothing to join, nothing to
+ *    permit, and this used to be the case the app refused outright.
+ *  - **A Wi-Fi Direct group** of its own: a real WPA2 access point needing no
+ *    router, no internet and nobody's permission. Here the code carries the
+ *    network name and password too, and the student's phone joins on its own.
+ *  - **The Wi-Fi they are both on**, last, because plenty of school access
+ *    points block phone-to-phone traffic and do it silently.
+ *
+ * In every case the files come straight off the teacher's phone.
  *
  * Nothing is uploaded. Nothing is stored on a server. Nothing crosses the
  * border. In a country where the connection is filtered and often absent, that
@@ -29,10 +38,10 @@
 import { Platform } from 'react-native';
 
 import Beam from '../../modules/beam/src/BeamModule';
-import type { BeamPeerEvent, BeamProgressEvent } from '../../modules/beam/src/Beam.types';
+import type { BeamPeerEvent, BeamProgressEvent, BeamRoute } from '../../modules/beam/src/Beam.types';
 import { beamManifest, encodeBeam, MAX_PAYLOAD_BYTES, type BeamAssignment, type BeamPayload } from '@/lib/beam';
 
-export type { BeamPeerEvent, BeamProgressEvent };
+export type { BeamPeerEvent, BeamProgressEvent, BeamRoute };
 
 /** A file to hand over, as the picker described it. */
 export type BeamOutgoing = { uri: string; name: string; mime: string; size: number };
@@ -43,25 +52,53 @@ export type BeamBlocker =
   | 'unsupported'
   | 'permission'
   | 'wifiOff'
-  | 'hotspotOn'
   | 'locationOff';
 
 /**
  * Whether this build and this phone can share at all.
  *
- * Three distinct answers, because the fix is different for each and "sharing
- * is unavailable" tells the teacher nothing. `needsRebuild` is an APK from
- * before the feature existed — reinstall. `unsupported` is a tablet with no
- * Wi-Fi Direct radio — nothing to be done. `permission` is a prompt they said
- * no to — ask again.
+ * Distinct answers, because the fix is different for each and "sharing is
+ * unavailable" tells the teacher nothing. `needsRebuild` is an APK from before
+ * the feature existed — reinstall. `unsupported` is a phone with no Wi-Fi
+ * Direct radio and no network to fall back on. `permission` is a prompt they
+ * said no to — ask again.
+ *
+ * A running hotspot used to be on this list and is not any more. It is a
+ * network, the class is already on it, and the app serves over it — see
+ * `beamRoute`.
  */
 export function beamBlocker(): Exclude<BeamBlocker, 'permission'> | null {
   if (Platform.OS !== 'android' || !Beam) return 'needsRebuild';
-  if (!Beam.isAvailable()) return 'unsupported';
-  // Wi-Fi and Location Services are both switches the teacher can flip in ten
-  // seconds, and both make a group impossible however long it is given. Asking
-  // now turns a thirty-second timeout into a sentence and a button.
-  return Beam.blocker?.() ?? null;
+
+  /*
+    Asked of the native side first, and `isAvailable` only as a fallback.
+
+    The order matters and used to be the other way round. `isAvailable` reports
+    one thing — whether this phone has a Wi-Fi Direct radio — and a phone
+    without one can still hand a worksheet over its own hotspot or the room's
+    Wi-Fi. Checking it first greyed the button on a tablet that would have
+    worked.
+  */
+  const blocker = Beam.blocker?.();
+  if (blocker !== undefined) return blocker;
+  // A build from before the ladder. Its only route was the group.
+  return Beam.isAvailable() ? null : 'unsupported';
+}
+
+/**
+ * How the next share would reach the class, or null when nothing would.
+ *
+ * Asked before opening the sharing screen, because it changes what the teacher
+ * has to tell the room: on the direct route the code carries a network to
+ * join, and on the other two the students are already somewhere the teacher's
+ * phone can be reached.
+ */
+export function beamRoute(): BeamRoute | null {
+  if (Platform.OS !== 'android' || !Beam) return null;
+  // A build from before the ladder existed has no `route`, and the group was
+  // the only thing it could do. Say so rather than refusing to share on it.
+  if (!Beam.route) return 'direct';
+  return Beam.route();
 }
 
 /** Thrown when the assignment will not fit in a readable code. */
@@ -95,14 +132,11 @@ export class BeamSettingOff extends Error {
 }
 
 /** A blocker the teacher fixes with a switch, rather than by giving up. */
-export type SettingOff = 'wifiOff' | 'hotspotOn' | 'locationOff';
+export type SettingOff = 'wifiOff' | 'locationOff';
 
 /** Which Android settings screen fixes it. */
 export const SETTINGS_INTENT: Record<SettingOff, string> = {
   wifiOff: 'android.settings.WIFI_SETTINGS',
-  // No public action opens the hotspot page directly on every OEM, and the
-  // wireless-settings screen is one tap above it everywhere.
-  hotspotOn: 'android.settings.WIRELESS_SETTINGS',
   locationOff: 'android.settings.LOCATION_SOURCE_SETTINGS',
 };
 
@@ -117,16 +151,29 @@ export async function startBeam(
   assignment: BeamAssignment,
   files: BeamOutgoing[],
   token: string,
-): Promise<{ payload: string; ssid: string; passphrase: string }> {
+): Promise<{ payload: string; ssid: string; passphrase: string; route: BeamRoute }> {
   if (!Beam) throw new Error('Beam is not available in this build');
 
-  const setting = Beam.blocker?.();
-  if (setting === 'wifiOff' || setting === 'hotspotOn' || setting === 'locationOff') {
-    throw new BeamSettingOff(setting);
+  const route = beamRoute();
+  if (route === null) {
+    const setting = Beam.blocker?.();
+    if (setting === 'wifiOff' || setting === 'locationOff') throw new BeamSettingOff(setting);
+    throw new Error('No way to reach the class from this phone');
   }
 
-  const permission = await Beam.requestPermissionsAsync();
-  if (!permission.granted) throw new BeamNotPermitted();
+  /*
+    Asked for only where it is needed.
+
+    Bringing up a Wi-Fi Direct group is what Android gates behind the nearby-
+    devices permission. Serving over a hotspot that is already running, or over
+    the Wi-Fi the phone is already on, is an ordinary socket on an ordinary
+    network — so a teacher taking either of those routes is never shown a
+    permission dialog, which is right, because there is nothing to permit.
+  */
+  if (route === 'direct') {
+    const permission = await Beam.requestPermissionsAsync();
+    if (!permission.granted) throw new BeamNotPermitted();
+  }
 
   const group = await Beam.startHostAsync(
     beamManifest(assignment),
@@ -136,8 +183,12 @@ export async function startBeam(
 
   const full: BeamPayload = {
     ...assignment,
-    n: group.ssid,
-    q: group.passphrase,
+    // Omitted off the direct route rather than sent empty: an absent network
+    // name is what tells the student's phone "you are already where you need
+    // to be", and it is also the difference between a code that fits and one
+    // that does not.
+    ...(group.ssid ? { n: group.ssid } : null),
+    ...(group.passphrase ? { q: group.passphrase } : null),
     h: group.host,
     o: group.port,
     k: token,
@@ -152,7 +203,12 @@ export async function startBeam(
     throw new BeamTooBig();
   }
 
-  return { payload, ssid: group.ssid, passphrase: group.passphrase };
+  return {
+    payload,
+    ssid: group.ssid,
+    passphrase: group.passphrase,
+    route: group.route,
+  };
 }
 
 /**

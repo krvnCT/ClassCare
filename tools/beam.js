@@ -50,12 +50,24 @@
 const net = require('node:net');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 /* ------------------------------------------------------------------ Wire */
 
-const MAGIC = Buffer.from('CCB1', 'ascii');
+const MAGIC = Buffer.from('BEAM2', 'ascii');
 const STATUS_OK = 0;
 const STATUS_BAD_TOKEN = 1;
+const STATUS_BAD_VERSION = 2;
+
+/**
+ * CRC32, from zlib rather than hand-rolled.
+ *
+ * `zlib.crc32` is the same polynomial and the same seed as `java.util.zip.CRC32`,
+ * which is what matters: this file exists to disagree with the Kotlin when the
+ * Kotlin is wrong, and it can only do that if the arithmetic is identical for
+ * the right reasons rather than by coincidence.
+ */
+const crc32 = (buffer, seed = 0) => zlib.crc32(buffer, seed);
 const MAX_MANIFEST = 256 * 1024;
 const MAX_TOKEN = 256;
 const MAX_FILE = 64n * 1024n * 1024n;
@@ -140,6 +152,7 @@ async function pull(host, port, token, into) {
 
   const status = (await readExactly(socket, 1)).readUInt8();
   if (status === STATUS_BAD_TOKEN) throw new Error('Rejected: wrong token');
+  if (status === STATUS_BAD_VERSION) throw new Error('The other end speaks a different version');
   if (status !== STATUS_OK) throw new Error(`Unexpected status ${status}`);
 
   const manifestJson = await readText(socket, MAX_MANIFEST);
@@ -159,22 +172,35 @@ async function pull(host, port, token, into) {
     const target = path.join(into, name);
     const handle = fs.openSync(target, 'w');
     let got = 0n;
+    let sum = 0;
     try {
       while (got < size) {
         const want = Number(size - got > 65536n ? 65536n : size - got);
         const chunk = await readExactly(socket, want);
         fs.writeSync(handle, chunk);
+        sum = crc32(chunk, sum);
         got += BigInt(chunk.length);
       }
     } finally {
       fs.closeSync(handle);
     }
+
+    // Read whether or not we intend to complain: it is part of the frame, and
+    // skipping it would desynchronise every file after this one.
+    const declared = (await readExactly(socket, 4)).readUInt32BE();
+
     // The declared size is what the sender measured; the count is what arrived.
     // They must agree, and saying so here is what makes this a test rather than
     // a download.
     const actual = BigInt(fs.statSync(target).size);
-    const ok = actual === size ? 'ok' : `MISMATCH declared ${size}`;
+    const ok =
+      actual !== size
+        ? `MISMATCH declared ${size}`
+        : sum !== declared
+          ? `CORRUPT crc ${sum} want ${declared}`
+          : 'ok';
     console.log(`  ${name}  ${actual} bytes  ${ok}`);
+    if (ok !== 'ok') throw new Error(`${name}: ${ok}`);
   }
 
   socket.end();
@@ -219,8 +245,13 @@ function serve(filePaths, { token, quiet } = {}) {
   });
 
   async function handle(socket) {
-    const magic = await readExactly(socket, 4);
-    if (!magic.equals(MAGIC)) throw new Error(`Not our protocol: ${magic.toString('hex')}`);
+    const magic = await readExactly(socket, MAGIC.length);
+    if (!magic.equals(MAGIC)) {
+      socket.write(Buffer.from([STATUS_BAD_VERSION]));
+      socket.end();
+      if (!quiet) console.log(`  turned away ${magic.toString('ascii')}`);
+      return;
+    }
 
     const offered = await readText(socket, MAX_TOKEN);
     if (offered !== token) {
@@ -238,12 +269,19 @@ function serve(filePaths, { token, quiet } = {}) {
       const size = Buffer.alloc(8);
       size.writeBigUInt64BE(BigInt(file.size));
       socket.write(size);
+      let sum = 0;
       await new Promise((resolve, reject) => {
         const stream = fs.createReadStream(file.path);
         stream.on('error', reject);
+        stream.on('data', (chunk) => {
+          sum = crc32(chunk, sum);
+        });
         stream.on('end', resolve);
         stream.pipe(socket, { end: false });
       });
+      const checksum = Buffer.alloc(4);
+      checksum.writeUInt32BE(sum >>> 0);
+      socket.write(checksum);
     }
     socket.end();
     if (!quiet) console.log('  done');
@@ -266,7 +304,6 @@ function serve(filePaths, { token, quiet } = {}) {
  * wrong and the disagreement is the finding.
  */
 function encodePayload(obj) {
-  const zlib = require('node:zlib');
   const json = Buffer.from(JSON.stringify(obj), 'utf8');
   const b64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const plain = 'j' + b64url(json);
@@ -277,7 +314,6 @@ function encodePayload(obj) {
 }
 
 function decodePayload(text) {
-  const zlib = require('node:zlib');
   const raw = text.trim();
   if (!raw.startsWith('CCB1:')) return null;
   const marked = raw.slice(5);
@@ -393,6 +429,71 @@ async function selftest() {
     rejected = /wrong token/i.test(e.message);
   }
   check('a wrong token is refused', rejected);
+
+  /*
+    An old app is turned away with a reason.
+
+    The two apps ship separately, so this will happen — a student who updated
+    one and not the other. Answering with a status byte rather than closing the
+    socket is what lets their screen say "update the other app" instead of
+    "something went wrong".
+  */
+  console.log('version:');
+  const stale = await new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
+      socket.write(Buffer.from('CCB1', 'ascii'));
+      socket.write(Buffer.from([0, 0, 0, 0]));
+    });
+    socket.once('data', (buf) => {
+      socket.destroy();
+      resolve(buf[0]);
+    });
+    socket.once('error', () => resolve(-1));
+    socket.setTimeout(3000, () => {
+      socket.destroy();
+      resolve(-1);
+    });
+  });
+  check('last version’s magic is answered, not dropped', stale === STATUS_BAD_VERSION,
+    stale === -1 ? 'nothing came back' : `status ${stale}`);
+
+  /*
+    And the checksum actually catches something.
+
+    A check that is present but never fires is worse than none: it is a line of
+    code everyone trusts. This flips one bit in the middle of the stream and
+    requires the reader to refuse the file.
+  */
+  console.log('integrity:');
+  const bent = await new Promise((resolve) => {
+    const flipper = net.createServer((client) => {
+      const upstream = net.createConnection({ host: '127.0.0.1', port });
+      client.pipe(upstream);
+      let seen = 0;
+      upstream.on('data', (chunk) => {
+        // Past the handshake and the manifest, so the damage lands in a file's
+        // bytes rather than in a length the reader would reject anyway.
+        const copy = Buffer.from(chunk);
+        if (seen > 512 && copy.length) copy[0] ^= 0xff;
+        seen += chunk.length;
+        client.write(copy);
+      });
+      upstream.on('end', () => client.end());
+      upstream.on('error', () => client.destroy());
+    });
+    flipper.listen(0, '127.0.0.1', async () => {
+      const proxied = flipper.address().port;
+      let caught = null;
+      try {
+        await pullQuiet('127.0.0.1', proxied, token, path.join(dir, 'bent'));
+      } catch (e) {
+        caught = e.message;
+      }
+      flipper.close();
+      resolve(caught);
+    });
+  });
+  check('a flipped bit is refused', bent !== null && /CORRUPT/.test(bent), bent ?? 'accepted it');
 
   console.log('payload:');
   const payload = {

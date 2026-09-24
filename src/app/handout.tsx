@@ -2,11 +2,16 @@
  * The QR a teacher holds up in front of the class, and the phone that serves
  * the files behind it.
  *
- * This screen is the whole transfer. Opening it turns the teacher's phone into
- * a Wi-Fi access point and a file server; leaving it turns both off again. The
- * code on screen is not a link to anything — there is nothing on the far side
- * of it — it carries the assignment itself plus the network name, password,
- * port and token a student's phone needs to join and ask.
+ * This screen is the whole transfer. Opening it starts a file server on the
+ * teacher's phone — and, where there is no network to use, an access point as
+ * well; leaving it stops both. The code on screen is not a link to anything —
+ * there is nothing on the far side of it — it carries the assignment itself
+ * plus everything a student's phone needs to reach this one.
+ *
+ * Which network that is over is not fixed, and the screen says which it turned
+ * out to be: the teacher's own hotspot if it is running, a Wi-Fi Direct group
+ * otherwise, and the Wi-Fi they are both on as a last resort. The teacher is
+ * the one talking to the room, so they need the sentence that goes with it.
  *
  * ## Why the work happens here and not on the assignment screen
  *
@@ -40,6 +45,7 @@ import {
   BeamNotPermitted,
   BeamSettingOff,
   BeamTooBig,
+  type BeamRoute,
   onBeamPeer,
   SETTINGS_INTENT,
   type SettingOff,
@@ -84,6 +90,17 @@ export default function HandoutScreen() {
   const madeAt = useRef(Math.floor(Date.now() / 1000)).current;
 
   const [payload, setPayload] = useState<string | null>(null);
+  /**
+   * Which of the three ways this turned out to be reached on.
+   *
+   * On screen, because it changes what the teacher has to say out loud. A
+   * Wi-Fi Direct group is one the students' phones join by themselves; a
+   * hotspot is one they have to be on already. Telling a room "just scan" when
+   * half of them are not on the network is the difference between a transfer
+   * and a minute of confusion.
+   */
+  const [route, setRoute] = useState<BeamRoute | null>(null);
+  const [network, setNetwork] = useState<{ ssid: string; passphrase: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Set when the fix is a system switch, so the screen can offer the screen. */
   const [settingOff, setSettingOff] = useState<SettingOff | null>(null);
@@ -131,14 +148,16 @@ export default function HandoutScreen() {
           return;
         }
         try {
-          const { payload: encoded } = await startBeam(assignment, files, token);
+          const started = await startBeam(assignment, files, token);
           // The teacher left while Android was bringing the group up. Take it
           // straight back down — the cleanup below already ran.
           if (cancelled) {
             void stopBeam();
             return;
           }
-          setPayload(encoded);
+          setRoute(started.route);
+          setNetwork(started.ssid ? { ssid: started.ssid, passphrase: started.passphrase } : null);
+          setPayload(started.payload);
         } catch (e) {
           if (cancelled) return;
           if (e instanceof BeamTooBig) setError(t('beam.tooBig'));
@@ -244,6 +263,52 @@ export default function HandoutScreen() {
         <Text style={styles.scanHint}>{t('beam.scanHint')}</Text>
 
         {/*
+          What to tell the room, which is different for each route.
+
+          The teacher is the one talking; the app's job here is to give them
+          the sentence. On the direct route the students' phones join the group
+          by themselves and there is nothing to say; on the other two they have
+          to already be on the network, and a teacher who does not know that
+          finds out by watching nothing happen.
+        */}
+        {route ? (
+          <View style={styles.route}>
+            <Icon
+              name={route === 'direct' ? 'qr' : 'phone'}
+              size={15}
+              color={color.primary}
+            />
+            <Text style={styles.routeLabel}>{t(`beam.route.${route}`)}</Text>
+          </View>
+        ) : null}
+
+        {/*
+          The network written out, for the phone that cannot join on its own.
+
+          Below Android 10 no app may join a named network for the user, so the
+          student types it once in Settings. Shown to everyone rather than
+          detected, because the teacher is facing a room of mixed handsets and
+          cannot be asked to work out which of them is which.
+        */}
+        {network ? (
+          <Card style={styles.network}>
+            <Text style={styles.networkHint}>{t('beam.manualHint')}</Text>
+            <View style={styles.networkRow}>
+              <Text style={styles.networkKey}>{t('beam.networkName')}</Text>
+              <Text style={styles.networkValue} selectable>
+                {network.ssid}
+              </Text>
+            </View>
+            <View style={styles.networkRow}>
+              <Text style={styles.networkKey}>{t('beam.networkPassword')}</Text>
+              <Text style={styles.networkValue} selectable>
+                {network.passphrase}
+              </Text>
+            </View>
+          </Card>
+        ) : null}
+
+        {/*
           The only feedback in the room that any of this worked. A teacher
           holding up a code with no counter has to ask thirty people whether it
           arrived.
@@ -322,6 +387,35 @@ const makeStyles = ({ color }: Theme) =>
       textAlign: 'center',
       marginTop: 14,
     },
+
+    route: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 9,
+      marginTop: 12,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+      borderRadius: radius.control,
+      backgroundColor: color.primaryTint,
+    },
+    routeLabel: {
+      flex: 1,
+      fontFamily: body[500],
+      fontSize: 12.5,
+      lineHeight: 18.5,
+      color: color.primaryInk,
+    },
+
+    network: { marginTop: 10, gap: 8, padding: 14 },
+    networkHint: {
+      fontFamily: body[400],
+      fontSize: 12,
+      lineHeight: 17.5,
+      color: color.mutedLight,
+    },
+    networkRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    networkKey: { width: 92, fontFamily: body[400], fontSize: 12.5, color: color.mutedLight },
+    networkValue: { flex: 1, fontFamily: body[700], fontSize: 14, color: color.ink },
 
     tally: {
       flexDirection: 'row',

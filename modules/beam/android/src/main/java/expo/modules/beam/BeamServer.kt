@@ -14,6 +14,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
 
 /** One file the teacher is handing out, as the sender sees it. */
 data class Outgoing(val uri: String, val name: String, val mime: String)
@@ -115,9 +116,18 @@ class BeamServer(
         val input = DataInputStream(BufferedInputStream(sock.getInputStream()))
         val out = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), Wire.CHUNK))
 
-        val magic = ByteArray(4)
+        val magic = ByteArray(Wire.MAGIC.size)
         input.readFully(magic)
-        if (!magic.contentEquals(Wire.MAGIC)) return
+        if (!magic.contentEquals(Wire.MAGIC)) {
+          // Said rather than hung up on. The two apps ship separately, and a
+          // student running last month's StudentCare against this month's
+          // ClassCare otherwise gets a transfer that fails with nothing to act
+          // on. One byte back turns that into "update the other app".
+          out.writeByte(Wire.STATUS_BAD_VERSION)
+          out.flush()
+          onEvent(mapOf("kind" to "rejected", "peer" to who))
+          return
+        }
 
         val offered = Wire.readText(input, Wire.MAX_TOKEN)
         if (!Wire.tokensMatch(offered, token)) {
@@ -150,6 +160,11 @@ class BeamServer(
     val size = sizeOf(uri)
     out.writeLong(size)
 
+    // Computed over exactly the bytes that go on the wire, padding included —
+    // so the receiver's answer is about the transfer rather than about the file
+    // the picker once saw.
+    val crc = CRC32()
+
     openStream(uri).use { source ->
       val buffer = ByteArray(Wire.CHUNK)
       var sent = 0L
@@ -164,10 +179,12 @@ class BeamServer(
         if (read < 0) {
           java.util.Arrays.fill(buffer, 0, want, 0)
           out.write(buffer, 0, want)
+          crc.update(buffer, 0, want)
           sent += want
           continue
         }
         out.write(buffer, 0, read)
+        crc.update(buffer, 0, read)
         sent += read
         // Throttled: at 64 KB a chunk a 10 MB file is 160 writes, and thirty
         // students at once would be five thousand bridge crossings for a number
@@ -186,6 +203,7 @@ class BeamServer(
         }
       }
     }
+    out.writeInt(crc.value.toInt())
     out.flush()
   }
 
