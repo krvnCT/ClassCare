@@ -88,6 +88,21 @@ export declare class BeamModuleType extends NativeModule<BeamEvents> {
   blocker(): 'unsupported' | 'wifiOff' | 'locationOff' | null;
   /** False below Android 10 — the student must join the network by hand. */
   canJoinAutomatically(): boolean;
+  /**
+   * Whether Wi-Fi is switched on.
+   *
+   * The receiving side's one precondition: a phone with Wi-Fi off joins
+   * nothing. Separate from `blocker`, which is about sending.
+   */
+  wifiEnabled(): boolean;
+  /**
+   * Copy a received file into the phone's Downloads folder.
+   *
+   * Resolves to where it landed, or null if it could not be copied — which is
+   * not an error worth failing a transfer over, since the file is already in
+   * the app.
+   */
+  exportAsync(path: string, name: string, mime: string, folder: string): Promise<string | null>;
   getPermissionsAsync(): Promise<{ granted: boolean; canAskAgain: boolean; status: string }>;
   requestPermissionsAsync(): Promise<{ granted: boolean; canAskAgain: boolean; status: string }>;
   /** Create the group, start serving, and report how to be reached. */

@@ -4,6 +4,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
 import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -57,12 +58,32 @@ object BeamClient {
       Wire.writeText(out, token, Wire.MAX_TOKEN)
       out.flush()
 
-      val status = input.readUnsignedByte()
+      /*
+        Nothing at all came back.
+
+        An end-of-stream here means the teacher's phone accepted the connection
+        and hung up without a word, and there is one overwhelming reason for
+        that: an older build on the other end, which closed the socket silently
+        when the magic did not match instead of saying so. Reporting
+        `EOFException` sent a student to look at their Wi-Fi; reporting the real
+        cause sends them to update the app.
+      */
+      val status = try {
+        input.readUnsignedByte()
+      } catch (_: EOFException) {
+        throw VersionMismatchException()
+      }
       if (status == Wire.STATUS_BAD_TOKEN) throw BadTokenException()
       if (status == Wire.STATUS_BAD_VERSION) throw VersionMismatchException()
       if (status != Wire.STATUS_OK) throw IOException("Unexpected status $status")
 
-      val manifest = Wire.readText(input, Wire.MAX_MANIFEST)
+      val manifest = try {
+        Wire.readText(input, Wire.MAX_MANIFEST)
+      } catch (_: EOFException) {
+        // Accepted us, then died before describing the work. Not a version
+        // problem — it got past the handshake — so say what it is.
+        throw CutOffException("before the handout arrived")
+      }
       val names = namesFrom(manifest)
 
       into.mkdirs()
@@ -74,7 +95,15 @@ object BeamClient {
 
       try {
         for (index in names.indices) {
-          val size = input.readLong()
+          val label = names.getOrNull(index)?.takeIf { it.isNotBlank() } ?: "file ${index + 1}"
+          // Named, so a transfer that dies halfway says which file it died on.
+          // The teacher's phone stops sending when it cannot read one of them,
+          // and "it failed" does not tell either of them which to look at.
+          val size = try {
+            input.readLong()
+          } catch (_: EOFException) {
+            throw CutOffException(label)
+          }
           if (size < 0 || size > Wire.MAX_FILE) throw IOException("Bad file size $size")
 
           val target = unique(into, safeName(names[index], index))
@@ -109,8 +138,12 @@ object BeamClient {
             usually at home, with nobody to ask. The `.part` file is thrown
             away by the `catch` below, so a failure here leaves nothing.
           */
-          val expected = input.readInt()
-          if (crc.value.toInt() != expected) throw CorruptFileException(names[index])
+          val expected = try {
+            input.readInt()
+          } catch (_: EOFException) {
+            throw CutOffException(label)
+          }
+          if (crc.value.toInt() != expected) throw CorruptFileException(label)
 
           landed.add(Received(target.absolutePath, target.name, size))
         }
@@ -187,3 +220,14 @@ class CorruptFileException(name: String) : IOException("$name did not arrive int
 
 /** The two apps were built from different versions of the protocol. */
 class VersionMismatchException : IOException("The other app is a different version")
+
+/**
+ * The teacher's phone stopped sending partway through.
+ *
+ * Separate from corruption, because the remedy is different and so is the
+ * cause: this is the shape a *sender-side* failure takes on the receiving end.
+ * A file the teacher's phone could not read, or a student who walked out of
+ * range, both arrive here — and naming the file is what lets the two of them
+ * work out which.
+ */
+class CutOffException(val where: String) : IOException("The transfer stopped at $where")

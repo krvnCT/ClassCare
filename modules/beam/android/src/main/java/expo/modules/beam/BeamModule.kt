@@ -114,6 +114,45 @@ class BeamModule : Module() {
     /** False below Android 10: the student has to join the network by hand. */
     Function("canJoinAutomatically") { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }
 
+    /**
+     * Whether Wi-Fi is switched on.
+     *
+     * The receiving side's whole precondition. A student whose Wi-Fi is off
+     * joins nothing, and the `NetworkRequest` used to express that by sitting
+     * there for forty-five seconds and then failing with "could not join" —
+     * which reads as the teacher's fault and is one tap from being fixed.
+     *
+     * No permission needed, and deliberately not part of `blocker`: that one
+     * answers a question about *sending*, where a running hotspot is a route
+     * rather than a problem. Here it is only ever about joining.
+     */
+    Function("wifiEnabled") {
+      val wifi = context.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+      wifi?.isWifiEnabled == true
+    }
+
+    /**
+     * Copy a received file somewhere the student can find it without this app.
+     *
+     * Files land in app storage, which is right — they survive, nothing else on
+     * the phone can overwrite them, and they go when the app goes. But a
+     * student told to "send me the worksheet" has to be able to reach it from a
+     * file manager or a chat app, and app storage is invisible to both.
+     *
+     * So each file is also copied into `Downloads/<folder>/`. MediaStore on
+     * API 29+, which needs no permission at all; the public Downloads directory
+     * below that, where `WRITE_EXTERNAL_STORAGE` still applies and is declared
+     * with `maxSdkVersion="32"` for exactly this.
+     *
+     * Returns where it went, for the screen to show. Failure is not fatal and
+     * is reported as null: the file is still in the app, and a handout the
+     * student can open but not export is far better than a transfer reported
+     * as failed.
+     */
+    AsyncFunction("exportAsync") { path: String, name: String, mime: String, folder: String ->
+      Downloads.save(context, File(path), name, mime, folder)
+    }
+
     AsyncFunction("getPermissionsAsync") { promise: Promise ->
       Permissions.getPermissionsWithPermissionsManager(appContext.permissions, promise, *needed())
     }
@@ -350,6 +389,7 @@ class BeamModule : Module() {
     is CodedException -> this
     is BadTokenException -> BeamBadTokenException()
     is CorruptFileException -> BeamCorruptException(message ?: "")
+    is CutOffException -> BeamCutOffException(where)
     is VersionMismatchException -> BeamVersionException()
     else -> BeamFailedException(message ?: javaClass.simpleName)
   }
@@ -440,6 +480,19 @@ class BeamBadTokenException : CodedException(
 class BeamCorruptException(name: String) : CodedException(
   "ERR_BEAM_CORRUPT",
   if (name.isEmpty()) "A file did not arrive intact." else name,
+  null,
+)
+
+/**
+ * The sending phone stopped partway through.
+ *
+ * Carries the file it stopped at, because that is the one fact that separates
+ * "stand closer" from "the teacher cannot read that file" — and the student is
+ * standing next to the teacher and can simply say which it was.
+ */
+class BeamCutOffException(where: String) : CodedException(
+  "ERR_BEAM_CUT_OFF",
+  where,
   null,
 )
 

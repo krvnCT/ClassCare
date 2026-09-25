@@ -117,6 +117,15 @@ export default function HandoutScreen() {
   const [attempt, setAttempt] = useState(0);
   const [received, setReceived] = useState(0);
   const [busyPeers, setBusyPeers] = useState(0);
+  /**
+   * The last student whose transfer went wrong, and why.
+   *
+   * The teacher is the only one holding both phones' side of the story, and
+   * until now their screen said nothing at all when a transfer failed — the
+   * counter simply did not go up. The student saw an error, the teacher saw a
+   * QR code, and neither could tell the other what had happened.
+   */
+  const [peerFailure, setPeerFailure] = useState<string | null>(null);
 
   const assignment = useMemo(
     () => ({
@@ -194,15 +203,25 @@ export default function HandoutScreen() {
   useEffect(
     () =>
       onBeamPeer((event) => {
-        if (event.kind === 'started') setBusyPeers((n) => n + 1);
-        else if (event.kind === 'done') {
+        if (event.kind === 'started') {
+          setBusyPeers((n) => n + 1);
+          setPeerFailure(null);
+        } else if (event.kind === 'done') {
           setBusyPeers((n) => Math.max(0, n - 1));
           setReceived(event.total);
-        } else if (event.kind === 'failed' || event.kind === 'rejected') {
+        } else if (event.kind === 'failed') {
           setBusyPeers((n) => Math.max(0, n - 1));
+          setPeerFailure(event.message);
+        } else if (event.kind === 'rejected') {
+          setBusyPeers((n) => Math.max(0, n - 1));
+          // A code from a previous lesson, or an app too old to speak to this
+          // one. Both look identical from here, and both are worth saying.
+          setPeerFailure(t('beam.peerRejected'));
+        } else if (event.kind === 'error') {
+          setPeerFailure(event.message);
         }
       }),
-    [],
+    [t],
   );
 
   /* ------------------------------------------------------------- Render */
@@ -323,6 +342,21 @@ export default function HandoutScreen() {
           </View>
         ) : null}
 
+        {/*
+          What went wrong for the student standing in front of them.
+
+          Shown on the teacher's screen because the teacher is the one who can
+          act on it: an out-of-date app on a student's phone, a file this phone
+          could not read, a code from last lesson. The student's screen says its
+          half; this is the other.
+        */}
+        {peerFailure ? (
+          <View style={styles.peerFailure}>
+            <Icon name="warning" size={15} color={color.dangerDeep} />
+            <Text style={styles.peerFailureText}>{peerFailure}</Text>
+          </View>
+        ) : null}
+
         <Card style={styles.details}>
           <Text style={styles.title}>{assignment.t}</Text>
           {assignment.w ? (
@@ -364,7 +398,7 @@ export default function HandoutScreen() {
   );
 }
 
-const makeStyles = ({ color }: Theme) =>
+const makeStyles = ({ accents, color }: Theme) =>
   StyleSheet.create({
     rescue: { paddingHorizontal: space.gutter, paddingBottom: 28, gap: 10 },
     detail: {
@@ -404,6 +438,24 @@ const makeStyles = ({ color }: Theme) =>
       fontSize: 12.5,
       lineHeight: 18.5,
       color: color.primaryInk,
+    },
+
+    peerFailure: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 9,
+      marginTop: 12,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+      borderRadius: radius.control,
+      backgroundColor: accents.rose.tint,
+    },
+    peerFailureText: {
+      flex: 1,
+      fontFamily: body[500],
+      fontSize: 12.5,
+      lineHeight: 18.5,
+      color: accents.rose.ink,
     },
 
     network: { marginTop: 10, gap: 8, padding: 14 },
