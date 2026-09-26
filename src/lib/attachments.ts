@@ -9,7 +9,7 @@
  * a 10 MB PDF away from a request body limit measured in single megabytes.
  */
 import * as Crypto from 'expo-crypto';
-import { File } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 
 import { supabase } from '@/lib/supabase';
 
@@ -251,4 +251,59 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Handing files to the native transfer                                       */
+/* -------------------------------------------------------------------------- */
+
+/** A file the `beam` module can open by itself. */
+export type HandoutFile = { uri: string; name: string; mime: string; size: number };
+
+/**
+ * Copy the picked files somewhere the native side can read them.
+ *
+ * ## Why this exists
+ *
+ * The Storage Access Framework grants access to the *object* the picker
+ * returned, not to the `content://` string it carries — the note on
+ * `PickedAttachment.file` says as much. The QR handout screen is a different
+ * route, so the files reached it as URIs in route params, and by the time the
+ * native server opened one the grant was gone:
+ *
+ *     Permission Denial: opening provider … requires that you obtain access
+ *     using ACTION_OPEN_DOCUMENT or related APIs
+ *
+ * The teacher saw that; the student saw the transfer die. Copying here, while
+ * the picker's own handle is still in hand, turns each file into an ordinary
+ * `file://` path in this app's cache that anything can open — including a
+ * background thread in Kotlin, which is where it is actually read.
+ *
+ * ## Why the cache, and why it is emptied first
+ *
+ * These are copies of files the teacher already has, needed only while the
+ * sharing screen is open. The cache is the directory Android reclaims under
+ * pressure, which is the correct promise for them. Emptying it at the start of
+ * each share stops a term of handouts accumulating on a phone that has no
+ * space to spare.
+ */
+export function stageForHandout(files: PickedAttachment[]): HandoutFile[] {
+  const dir = new Directory(Paths.cache, 'handout');
+  if (dir.exists) dir.delete();
+  dir.create({ intermediates: true, idempotent: true });
+
+  const staged: HandoutFile[] = [];
+  for (const [index, picked] of files.entries()) {
+    // Indexed, so two files with the same name cannot collide, and sanitised
+    // because the name came off the teacher's storage and lands on a path.
+    const target = new File(dir, `${index}-${safeKey(picked.filename)}`);
+    picked.file.copySync(target);
+    staged.push({
+      uri: target.uri,
+      name: picked.filename,
+      mime: picked.mimeType,
+      size: picked.size,
+    });
+  }
+  return staged;
 }

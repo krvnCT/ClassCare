@@ -5,6 +5,7 @@ import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.net.wifi.WifiManager
@@ -14,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.net.Inet4Address
 import androidx.annotation.RequiresApi
 import kotlin.random.Random
 
@@ -369,22 +371,62 @@ class WifiJoin(context: Context) {
       .build()
 
     var settled = false
+    val main = Handler(Looper.getMainLooper())
+
+    fun finish(result: Result<Network>) {
+      if (settled) return
+      settled = true
+      done(result)
+    }
+
+    /*
+      Joined is not the same as reachable, and this is the bug that taught us.
+
+      `onAvailable` fires when the association completes — before DHCP has
+      handed out an address. A socket opened in that window has no route on the
+      interface and fails instantly with ENETUNREACH, which reads to a student
+      as "the teacher's phone is not there" when in fact their own phone was
+      half a second from being ready.
+
+      So wait for link properties carrying an IPv4 address. `ADDRESS_WAIT_MS`
+      is a backstop rather than a normal path: some OEM builds deliver the
+      address before the callback is even registered, and hanging on a
+      notification that has already been sent would be a worse bug than the one
+      being fixed.
+    */
     val cb = object : ConnectivityManager.NetworkCallback() {
+      private var joined: Network? = null
+
       override fun onAvailable(network: Network) {
-        if (settled) return
-        settled = true
-        done(Result.success(network))
+        joined = network
+        main.postDelayed({ if (!settled) finish(Result.success(network)) }, ADDRESS_WAIT_MS)
+      }
+
+      override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) {
+        val hasAddress = props.linkAddresses.any {
+          it.address is Inet4Address && !it.address.isLoopbackAddress
+        }
+        if (hasAddress) finish(Result.success(network))
       }
 
       override fun onUnavailable() {
-        if (settled) return
-        settled = true
-        done(Result.failure(BeamJoinException("Could not join $ssid")))
+        finish(Result.failure(BeamJoinException("Could not join $ssid")))
+      }
+
+      override fun onLost(network: Network) {
+        // Only interesting before we handed the network over; afterwards the
+        // transfer's own error is the better report.
+        if (joined != null) finish(Result.failure(BeamJoinException("Lost $ssid")))
       }
     }
 
     callback = cb
     connectivity.requestNetwork(request, cb, timeoutMs)
+  }
+
+  private companion object {
+    /** How long to wait for an address after the network says it is up. */
+    const val ADDRESS_WAIT_MS = 6_000L
   }
 
   /** Leave the group. Without this the student stays off the internet. */

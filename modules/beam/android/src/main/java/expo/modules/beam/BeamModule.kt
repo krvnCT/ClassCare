@@ -240,7 +240,17 @@ class BeamModule : Module() {
       // and student happen to share a working LAN. Skip straight to the socket.
       val ssid = options.ssid
       if (ssid.isNullOrEmpty()) {
-        pull(null, options, promise)
+        /*
+          Already on the right network — but say which one.
+
+          A plain socket goes over whatever Android calls the default network,
+          and a phone with mobile data keeps that as the default whenever the
+          Wi-Fi it is on has no internet. Both of the routes that land here —
+          the teacher's hotspot and a shared classroom network — look exactly
+          like that, so the teacher's address went out the cellular interface
+          and failed instantly as unreachable.
+        */
+        pull(LocalNet(context).wifiNetwork()?.socketFactory, options, promise)
         return@AsyncFunction
       }
 

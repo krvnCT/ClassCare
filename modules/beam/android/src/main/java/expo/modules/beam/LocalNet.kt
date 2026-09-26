@@ -2,6 +2,7 @@ package expo.modules.beam
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
 import java.net.Inet4Address
@@ -105,6 +106,33 @@ class LocalNet(context: Context) {
       }
     }
     return null
+  }
+
+  /**
+   * The Wi-Fi network itself, for pinning a socket to it.
+   *
+   * The reason this is needed rather than just opening a plain socket: Android
+   * routes an unbound socket over the *default* network, and a phone with
+   * mobile data keeps that as the default whenever the Wi-Fi it is on has no
+   * internet — which is exactly what a teacher's hotspot and a classroom
+   * network both look like. The teacher's `192.168.x.x` then goes out the
+   * cellular interface and fails instantly with ENETUNREACH, which reads as
+   * "the teacher's phone is not there".
+   *
+   * `getAllNetworks` rather than `activeNetwork`, for the same reason: the
+   * active one is the cellular network in precisely the case that matters.
+   */
+  fun wifiNetwork(): Network? {
+    val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+      ?: return null
+    @Suppress("DEPRECATION")
+    return cm.allNetworks.firstOrNull { network ->
+      val caps = cm.getNetworkCapabilities(network)
+      caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+        cm.getLinkProperties(network)?.linkAddresses?.any {
+          it.address is Inet4Address && !it.address.isLoopbackAddress
+        } == true
+    }
   }
 
   /**

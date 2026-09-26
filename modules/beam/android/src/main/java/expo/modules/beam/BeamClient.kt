@@ -7,7 +7,9 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
+import java.net.ConnectException
 import java.net.InetSocketAddress
+import java.net.NoRouteToHostException
 import java.net.Socket
 import java.util.zip.CRC32
 import javax.net.SocketFactory
@@ -45,9 +47,8 @@ object BeamClient {
     into: File,
     onProgress: (index: Int, received: Long, size: Long) -> Unit,
   ): Delivery {
-    val socket: Socket = factory?.createSocket() ?: Socket()
+    val socket: Socket = connect(factory, host, port)
     socket.use { sock ->
-      sock.connect(InetSocketAddress(host, port), 15_000)
       sock.soTimeout = 30_000
       sock.tcpNoDelay = true
 
@@ -162,6 +163,43 @@ object BeamClient {
   }
 
   /**
+   * Reach the teacher's phone, allowing for a network that is not quite ready.
+   *
+   * A freshly joined Wi-Fi network reports itself up before DHCP has finished,
+   * and a socket opened in that window fails immediately with "network is
+   * unreachable" — not after a timeout, instantly, which is why no amount of
+   * waiting inside `connect` helps. Retrying for a few seconds covers it, and
+   * covers the student who scanned a moment before the teacher's phone
+   * finished starting.
+   *
+   * Only for the two errors that mean "not yet". Anything else — refused,
+   * timed out — is a real answer and is passed straight through.
+   */
+  private fun connect(factory: SocketFactory?, host: String, port: Int): Socket {
+    val giveUp = System.currentTimeMillis() + REACH_MS
+    var last: Exception? = null
+    while (System.currentTimeMillis() < giveUp) {
+      val socket = factory?.createSocket() ?: Socket()
+      try {
+        socket.connect(InetSocketAddress(host, port), CONNECT_MS)
+        return socket
+      } catch (e: Exception) {
+        runCatching { socket.close() }
+        val notYet = e is ConnectException || e is NoRouteToHostException
+        if (!notYet) throw e
+        last = e
+        Thread.sleep(RETRY_MS)
+      }
+    }
+    throw UnreachableException(host, last)
+  }
+
+  /** Long enough for DHCP on a slow phone, short enough to still be waiting. */
+  private const val REACH_MS = 12_000L
+  private const val CONNECT_MS = 8_000
+  private const val RETRY_MS = 700L
+
+  /**
    * Filenames out of the manifest, without pulling in a JSON library.
    *
    * The manifest is handed back to JavaScript verbatim and parsed properly
@@ -220,6 +258,17 @@ class CorruptFileException(name: String) : IOException("$name did not arrive int
 
 /** The two apps were built from different versions of the protocol. */
 class VersionMismatchException : IOException("The other app is a different version")
+
+/**
+ * Nothing answered at the teacher's address.
+ *
+ * Almost always one thing on the routes with no network name in the code: this
+ * phone is not on the teacher's network. It is the failure a student hits when
+ * the teacher's hotspot is on and they have not joined it, and "connect failed:
+ * ENETUNREACH" is not a sentence that gets them any closer to joining it.
+ */
+class UnreachableException(host: String, cause: Exception?) :
+  IOException("Nothing answered at $host", cause)
 
 /**
  * The teacher's phone stopped sending partway through.

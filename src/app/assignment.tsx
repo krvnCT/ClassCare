@@ -44,9 +44,11 @@ import {
   formatBytes,
   MAX_FILES,
   pickAttachments,
+  stageForHandout,
   uploadAttachments,
   type PickedAttachment,
 } from '@/lib/attachments';
+import { describeError } from '@/lib/errors';
 import { hasSupabase } from '@/lib/supabase';
 import { useKeyboardInset } from '@/lib/useKeyboardInset';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
@@ -162,6 +164,27 @@ export default function Assignment() {
       return;
     }
 
+    /*
+      Copied out of the picker's custody before leaving this screen.
+
+      The Storage Access Framework grants access to the handle the picker
+      returned, not to the `content://` string on it, and the handout screen is
+      a different route — so passing the URIs across left the native server
+      opening files it had no permission for, and the teacher got
+
+        Permission Denial: … requires ACTION_OPEN_DOCUMENT or related APIs
+
+      while the student's transfer died with nothing useful said. `stageForHandout`
+      copies each one into the cache while the handle is still valid.
+    */
+    let staged;
+    try {
+      staged = stageForHandout(files);
+    } catch (e) {
+      void showAlert(t('beam.title'), describeError(e).message, 'danger');
+      return;
+    }
+
     router.push({
       pathname: '/handout',
       params: {
@@ -171,18 +194,9 @@ export default function Assignment() {
         title: selectedGroups.map((g) => g.name).join(', ') || t('assign.new'),
         instructions,
         teacher: useStore.getState().teacherName,
-        // The picker's own URIs, passed through rather than copied. On Android
-        // these are `content://` handles from the Storage Access Framework and
-        // the grant rides on them, which is why they are not rebuilt from a
-        // path — see the note on `PickedAttachment.file`.
-        files: JSON.stringify(
-          files.map((f) => ({
-            uri: f.file.uri,
-            name: f.filename,
-            mime: f.mimeType,
-            size: f.size,
-          })),
-        ),
+        // Plain `file://` paths in this app's cache — see `stageForHandout`
+        // above for why they cannot be the picker's own URIs.
+        files: JSON.stringify(staged),
       },
     });
   };

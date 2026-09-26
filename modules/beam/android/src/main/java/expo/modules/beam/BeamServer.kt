@@ -139,6 +139,23 @@ class BeamServer(
 
         out.writeByte(Wire.STATUS_OK)
         Wire.writeText(out, manifest, Wire.MAX_MANIFEST)
+        /*
+          Flushed here, and the reason is a bug it caused.
+
+          `out` buffers 64 KB, and the status byte plus a manifest never fill
+          that — so nothing actually left this phone until the first file
+          flushed. When opening that file threw instead (a `content://` handle
+          whose permission had lapsed), the socket closed with the buffer still
+          full, and the student's phone saw a connection accepted and dropped
+          without a byte. That is indistinguishable from an app too old to
+          speak the protocol, and it was reported as exactly that: "the other
+          app needs updating", for a file the teacher simply could not read.
+
+          Sending the manifest before touching a single file means the receiver
+          always knows what was promised, so a failure after this point reports
+          as a transfer that stopped — with the file's name on it.
+        */
+        out.flush()
         onEvent(mapOf("kind" to "started", "peer" to who))
 
         files.forEachIndexed { index, file -> sendOne(out, file, index, who) }
@@ -150,7 +167,14 @@ class BeamServer(
       }
     } catch (e: Exception) {
       onEvent(
-        mapOf("kind" to "failed", "peer" to who, "message" to (e.message ?: e.javaClass.simpleName)),
+        mapOf(
+          "kind" to "failed",
+          "peer" to who,
+          // The class name matters as much as the text here: a
+          // `SecurityException` reads as "this phone could not open the file",
+          // and its message alone does not say so.
+          "message" to listOfNotNull(e.javaClass.simpleName, e.message).joinToString(": "),
+        ),
       )
     }
   }
