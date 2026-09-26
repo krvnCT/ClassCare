@@ -13,7 +13,6 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.CRC32
 
 /** One file the teacher is handing out, as the sender sees it. */
@@ -58,7 +57,22 @@ class BeamServer(
    */
   private val workers = Executors.newFixedThreadPool(8)
   private val accepting = Executors.newSingleThreadExecutor()
-  private val served = AtomicInteger(0)
+
+  /**
+   * Which phones have the handout, not how many transfers finished.
+   *
+   * The teacher's screen reads "12 received" and acts on it — they stop
+   * holding the code up. Counting transfers meant a student who scanned twice
+   * counted twice, and a student whose first attempt failed and who tapped
+   * "try again" pushed the number up without anyone new getting anything. A
+   * teacher trusting that count puts the phone down with half the class
+   * missing the worksheet.
+   *
+   * Keyed by address, which is what identifies a phone on this network for the
+   * few minutes the code is up. Two students cannot share one, and one student
+   * keeps theirs across a retry.
+   */
+  private val served = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
   private var socket: ServerSocket? = null
 
@@ -161,9 +175,8 @@ class BeamServer(
         files.forEachIndexed { index, file -> sendOne(out, file, index, who) }
         out.flush()
 
-        onEvent(
-          mapOf("kind" to "done", "peer" to who, "total" to served.incrementAndGet()),
-        )
+        served.add(who)
+        onEvent(mapOf("kind" to "done", "peer" to who, "total" to served.size))
       }
     } catch (e: Exception) {
       onEvent(

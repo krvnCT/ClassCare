@@ -88,6 +88,18 @@ object BeamClient {
       val names = namesFrom(manifest)
 
       into.mkdirs()
+      /*
+        Checked once, here, rather than discovered per file.
+
+        A directory that cannot be made produced a `FileNotFoundException` on
+        every file in the handout, which reads as the files being missing
+        rather than as the destination being wrong — and the destination is
+        exactly what was wrong: a `file://` URI used as a path resolves
+        somewhere unwritable. One message naming the path beats five naming
+        the symptom.
+      */
+      if (!into.isDirectory) throw IOException("Cannot write to ${into.path}")
+
       val landed = mutableListOf<Received>()
       // Written under a `.part` name and renamed at the end, so a transfer that
       // dies halfway cannot leave something that looks like a finished

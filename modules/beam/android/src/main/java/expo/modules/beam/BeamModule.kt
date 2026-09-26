@@ -285,7 +285,7 @@ class BeamModule : Module() {
           host = options.host,
           port = options.port,
           token = options.token,
-          into = File(options.directory),
+          into = localDir(options.directory),
         ) { index, received, size ->
           sendEvent(
             "onBeamProgress",
@@ -360,6 +360,25 @@ class BeamModule : Module() {
     if (WifiDirectHost(context).blocker() == null) return "direct"
     if (net.lan() != null) return "lan"
     return null
+  }
+
+  /**
+   * The directory to write into, given what JavaScript calls a path.
+   *
+   * `expo-file-system` hands back `file:///data/user/0/…` from `Directory.uri`,
+   * and `java.io.File` takes that string as a *relative* path named
+   * `file:/data/user/0/…`. It then resolves under the process working
+   * directory, which is `/` and is not writable, and every file in the
+   * transfer failed with ENOENT — after the sending phone had already reported
+   * the whole handout as delivered.
+   *
+   * Both forms are accepted rather than one demanded, because the caller
+   * reasonably thinks of `uri` as the way to name a file in that library.
+   */
+  private fun localDir(raw: String): File {
+    if (!raw.startsWith("file:")) return File(raw)
+    val path = runCatching { android.net.Uri.parse(raw).path }.getOrNull()
+    return File(path ?: raw.removePrefix("file://"))
   }
 
   private fun stopHost() {
