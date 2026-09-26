@@ -17,8 +17,9 @@ import {
   requestNotificationPermission,
 } from '@/lib/notifications';
 import { useT } from '@/i18n/useT';
+import { deleteHandout, readHandoutLog, type SharedHandout } from '@/lib/handoutLog';
 import type { Message, Reply } from '@/data/types';
-import { timeAgo } from '@/lib/date';
+import { shortDate, timeAgo } from '@/lib/date';
 import { audienceKey, channelKey } from '@/lib/messageLabels';
 import { replyContextLabel } from '@/lib/replyContext';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
@@ -74,6 +75,26 @@ export default function Messages() {
   // answers neither.
   const sent = messages.filter((m) => !m.isAssignment);
   const assignments = messages.filter((m) => m.isAssignment);
+
+  /*
+    Handouts given out over Wi-Fi.
+
+    They never reach the server — that is the point of them — so they cannot
+    arrive in `messages`, and a teacher who had spent a lesson handing out
+    worksheets by QR found this tab empty. Read from disk on focus, which is
+    the only moment the list can have changed.
+  */
+  const [handouts, setHandouts] = useState<SharedHandout[]>([]);
+  useFocusEffect(
+    useCallback(() => {
+      setHandouts(readHandoutLog());
+    }, []),
+  );
+
+  const removeHandout = (id: string) => {
+    deleteHandout(id);
+    setHandouts(readHandoutLog());
+  };
 
   /**
    * Selection mode.
@@ -283,6 +304,47 @@ export default function Messages() {
           </Press>
         ) : null}
 
+        {/*
+          The QR handouts, above the emailed ones.
+
+          Newest first and separate, because they are a different act: an email
+          assignment went to addresses and can be looked up on a server, and
+          this one was handed to a room. Deleting removes this phone's note of
+          it — there is nothing anywhere else to remove.
+        */}
+        {tab === 'assignments' && !picking
+          ? handouts.map((h) => (
+              <SwipeToDelete
+                key={h.id}
+                title={t('assign.deleteHandoutTitle')}
+                message={t('assign.deleteHandoutHint')}
+                onDelete={() => removeHandout(h.id)}>
+                <Card style={styles.handoutCard}>
+                  <View style={styles.handoutHead}>
+                    <Icon name="qr" size={15} color={color.primary} />
+                    <Text style={styles.handoutTitle} numberOfLines={1}>
+                      {h.title}
+                    </Text>
+                    <Text style={styles.handoutWhen}>{shortDate(new Date(h.sharedAt))}</Text>
+                  </View>
+                  {h.body ? (
+                    <Text style={styles.handoutBody} numberOfLines={2}>
+                      {h.body}
+                    </Text>
+                  ) : null}
+                  <Text style={styles.handoutMeta}>
+                    {[
+                      h.files.length
+                        ? t('assign.fileCount', { count: h.files.length })
+                        : t('beam.noFiles'),
+                      t('beam.received', { count: h.received }),
+                    ].join(' · ')}
+                  </Text>
+                </Card>
+              </SwipeToDelete>
+            ))
+          : null}
+
         {tab === 'sent' || tab === 'assignments' ? (
           (tab === 'sent' ? sent : assignments).length ? (
             (tab === 'sent' ? sent : assignments).map((m) =>
@@ -307,7 +369,7 @@ export default function Messages() {
                 </SwipeToDelete>
               ),
             )
-          ) : (
+          ) : tab === 'assignments' && handouts.length ? null : (
             <EmptyState
               title={tab === 'assignments' ? t('assign.title') : t('messages.nothingSent')}
               hint={tab === 'assignments' ? t('assign.studentsOnly') : t('messages.outboxHint')}
@@ -497,6 +559,20 @@ function ReplyCard({ reply }: { reply: Reply }) {
 
 const makeStyles = ({ color }: Theme) =>
   StyleSheet.create({
+    /* A handout given out over Wi-Fi, in the assignments list. */
+    handoutCard: { padding: 14, marginBottom: 10, gap: 4 },
+    handoutHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    handoutTitle: { flex: 1, fontFamily: body[700], fontSize: 14.5, color: color.ink },
+    handoutWhen: { fontFamily: body[400], fontSize: 12, color: color.mutedLight },
+    handoutBody: {
+      fontFamily: body[400],
+      fontSize: 13,
+      lineHeight: 19,
+      color: color.inkSoft,
+      marginTop: 4,
+    },
+    handoutMeta: { fontFamily: body[500], fontSize: 12, color: color.mutedLight, marginTop: 6 },
+
     notify: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
     notifyTitle: { fontFamily: body[700], fontSize: 14, color: color.ink },
     notifyBody: {

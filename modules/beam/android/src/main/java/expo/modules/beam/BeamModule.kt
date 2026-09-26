@@ -3,6 +3,7 @@ package expo.modules.beam
 import android.Manifest
 import android.content.Context
 import android.os.Build
+import android.provider.OpenableColumns
 import expo.modules.interfaces.permissions.Permissions
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
@@ -129,6 +130,38 @@ class BeamModule : Module() {
     Function("wifiEnabled") {
       val wifi = context.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
       wifi?.isWifiEnabled == true
+    }
+
+    /**
+     * The name a file is actually called, as its provider reports it.
+     *
+     * Android document URIs carry no name. The one on
+     * `content://com.android.providers.media.documents/document/msf%3A1000000033`
+     * is `msf:1000000033`, and that is what the picker hands back and what a
+     * class of students then saw at the top of their worksheet. The real name
+     * lives in the provider's `DISPLAY_NAME` column and has to be asked for.
+     *
+     * Returns null when the provider will not say, so the caller can keep
+     * whatever it already had rather than replacing a poor name with none.
+     *
+     * Here rather than in a module of its own because this is the only place in
+     * the app holding a `ContentResolver`, and `BeamServer` already asks the
+     * same provider for the same file's size.
+     */
+    Function("displayName") { uri: String ->
+      runCatching {
+        if (!uri.startsWith("content:")) return@runCatching null
+        context.contentResolver
+          .query(android.net.Uri.parse(uri), arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+          ?.use { cursor ->
+            val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (column >= 0 && cursor.moveToFirst() && !cursor.isNull(column)) {
+              cursor.getString(column)?.takeIf { it.isNotBlank() }
+            } else {
+              null
+            }
+          }
+      }.getOrNull()
     }
 
     /**

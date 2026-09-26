@@ -96,6 +96,13 @@ export declare class BeamModuleType extends NativeModule<BeamEvents> {
    */
   wifiEnabled(): boolean;
   /**
+   * The name a file's provider reports, or null when it will not say.
+   *
+   * Android document URIs carry no name: the picker falls back to the URI's
+   * last path segment, which for the media provider is `msf:1000000033`.
+   */
+  displayName(uri: string): string | null;
+  /**
    * Copy a received file into the phone's Downloads folder.
    *
    * Resolves to where it landed, or null if it could not be copied — which is

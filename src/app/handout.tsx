@@ -40,6 +40,7 @@ import { Button, Card, EmptyState, Overline } from '@/components/ui';
 import { useT } from '@/i18n/useT';
 import { formatBytes } from '@/lib/attachments';
 import { beamToken } from '@/lib/beam';
+import { recordHandout } from '@/lib/handoutLog';
 import {
   beamBlocker,
   BeamNotPermitted,
@@ -127,6 +128,15 @@ export default function HandoutScreen() {
    */
   const [peerFailure, setPeerFailure] = useState<string | null>(null);
 
+  /**
+   * The count, in a ref as well as in state.
+   *
+   * The cleanup function that writes the history runs after the last render,
+   * and a `useState` value captured in that closure is the one from when the
+   * effect was set up — zero. A ref reads what is true now.
+   */
+  const tally = useRef({ started: false, received: 0 });
+
   const assignment = useMemo(
     () => ({
       v: 1 as const,
@@ -161,6 +171,7 @@ export default function HandoutScreen() {
         setReceived(0);
         setBusyPeers(0);
         setPeerFailure(null);
+        tally.current = { started: false, received: 0 };
 
         const blocker = beamBlocker();
         if (blocker) {
@@ -176,6 +187,21 @@ export default function HandoutScreen() {
             void stopBeam();
             return;
           }
+          /*
+            Written down as soon as the code is up, and again on the way out
+            with the count. A teacher who shares a worksheet and closes the app
+            without waiting still has a record that they shared it — which is
+            the question the assignments tab is opened to answer.
+          */
+          recordHandout({
+            id: `${madeAt}-${token.slice(0, 6)}`,
+            title: assignment.t,
+            body: assignment.b,
+            sharedAt: madeAt * 1000,
+            files: files.map((f) => ({ name: f.name, size: f.size })),
+            received: 0,
+          });
+          tally.current = { started: true, received: 0 };
           setRoute(started.route);
           setNetwork(started.ssid ? { ssid: started.ssid, passphrase: started.passphrase } : null);
           setPayload(started.payload);
@@ -203,6 +229,19 @@ export default function HandoutScreen() {
 
       return () => {
         cancelled = true;
+        // The tally as it finally stood. Nothing arrives later to correct it —
+        // there is no server to hear from — so this is the last chance to
+        // record how many phones took the handout.
+        if (tally.current.started) {
+          recordHandout({
+            id: `${madeAt}-${token.slice(0, 6)}`,
+            title: assignment.t,
+            body: assignment.b,
+            sharedAt: madeAt * 1000,
+            files: files.map((f) => ({ name: f.name, size: f.size })),
+            received: tally.current.received,
+          });
+        }
         // Unconditional. Leaving this screen must take the access point down
         // whether it came up cleanly, failed halfway, or is still starting.
         void stopBeam();
@@ -221,6 +260,7 @@ export default function HandoutScreen() {
         } else if (event.kind === 'done') {
           setBusyPeers((n) => Math.max(0, n - 1));
           setReceived(event.total);
+          tally.current.received = event.total;
         } else if (event.kind === 'failed') {
           setBusyPeers((n) => Math.max(0, n - 1));
           setPeerFailure(event.message);

@@ -11,6 +11,7 @@
 import * as Crypto from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 
+import Beam from '../../modules/beam/src/BeamModule';
 import { supabase } from '@/lib/supabase';
 
 /** Matches `file_size_limit` on the bucket in migration 0010. */
@@ -96,10 +97,35 @@ export type PickOutcome = {
   rejected: { filename: string; reason: RejectReason }[];
 };
 
+/**
+ * What the file is really called.
+ *
+ * `File.name` on a SAF `content://` URI is the URI's last path segment, and
+ * Android's media provider makes those look like `msf:1000000033`. That is
+ * what went out to a class of students as the name of their worksheet. The
+ * provider knows the real one; it just has to be asked, which needs a
+ * `ContentResolver` and therefore the native side.
+ *
+ * Falls back to whatever the picker said. A poor name beats no name, and this
+ * has to keep working on a build where the module is missing.
+ */
+const nameOf = (file: File): string => {
+  const picked = file.name;
+  if (!file.uri.startsWith('content:')) return picked;
+  try {
+    return Beam?.displayName?.(file.uri)?.trim() || picked;
+  } catch {
+    return picked;
+  }
+};
+
 const mimeOf = (file: File): string => {
   const declared = file.type?.trim();
   if (declared && declared !== 'application/octet-stream') return declared;
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  // The real name, not the picker's — `msf:1000000033` has no extension to
+  // read, so every file the provider named that way fell back to a generic
+  // type and opened in nothing on the student's phone.
+  const ext = nameOf(file).split('.').pop()?.toLowerCase() ?? '';
   return BY_EXTENSION[ext] ?? 'application/octet-stream';
 };
 
@@ -132,7 +158,7 @@ export async function pickAttachments(alreadyPicked: number): Promise<PickOutcom
   const rejected: PickOutcome['rejected'] = [];
 
   for (const file of result.result) {
-    const filename = file.name;
+    const filename = nameOf(file);
 
     if (accepted.length + alreadyPicked >= MAX_FILES) {
       rejected.push({ filename, reason: 'tooMany' });
