@@ -68,9 +68,9 @@ class BeamServer(
    * teacher trusting that count puts the phone down with half the class
    * missing the worksheet.
    *
-   * Keyed by address, which is what identifies a phone on this network for the
-   * few minutes the code is up. Two students cannot share one, and one student
-   * keeps theirs across a retry.
+   * Keyed by the id each phone sends in the handshake — see `Wire`. An address
+   * was the first attempt and was nearly right: it survives a retry, but not a
+   * phone that drops off the network and comes back on a new lease.
    */
   private val served = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
@@ -144,6 +144,9 @@ class BeamServer(
         }
 
         val offered = Wire.readText(input, Wire.MAX_TOKEN)
+        // Read before the token is judged, so the frame stays in step whatever
+        // the answer turns out to be.
+        val device = Wire.readText(input, Wire.MAX_DEVICE)
         if (!Wire.tokensMatch(offered, token)) {
           out.writeByte(Wire.STATUS_BAD_TOKEN)
           out.flush()
@@ -175,7 +178,10 @@ class BeamServer(
         files.forEachIndexed { index, file -> sendOne(out, file, index, who) }
         out.flush()
 
-        served.add(who)
+        // Keyed by the phone, not by the connection and not by the address:
+        // a student who scans again, or whose Wi-Fi drops and comes back on a
+        // new address, is still one student with one worksheet.
+        served.add(device.ifBlank { who })
         onEvent(mapOf("kind" to "done", "peer" to who, "total" to served.size))
       }
     } catch (e: Exception) {

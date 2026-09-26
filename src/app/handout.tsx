@@ -149,6 +149,18 @@ export default function HandoutScreen() {
         setError(null);
         setSettingOff(null);
         setDetail(null);
+        /*
+          Every share starts at nobody.
+
+          The tally belongs to the handout on screen, not to the app. A teacher
+          who shares a worksheet, goes back, and shares a different one must not
+          see the first one's count sitting under the second one's code — they
+          read that number and stop holding the code up. Reset here rather than
+          on mount, because "Try again" re-runs this without remounting.
+        */
+        setReceived(0);
+        setBusyPeers(0);
+        setPeerFailure(null);
 
         const blocker = beamBlocker();
         if (blocker) {

@@ -44,6 +44,8 @@ object BeamClient {
     host: String,
     port: Int,
     token: String,
+    /** This phone, so the teacher's tally counts it once however often it asks. */
+    device: String,
     into: File,
     onProgress: (index: Int, received: Long, size: Long) -> Unit,
   ): Delivery {
@@ -57,6 +59,7 @@ object BeamClient {
 
       out.write(Wire.MAGIC)
       Wire.writeText(out, token, Wire.MAX_TOKEN)
+      Wire.writeText(out, device, Wire.MAX_DEVICE)
       out.flush()
 
       /*

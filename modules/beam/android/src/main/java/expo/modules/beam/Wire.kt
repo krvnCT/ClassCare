@@ -13,8 +13,9 @@ import java.security.MessageDigest
  * file. Copy the module, do not retype the protocol.
  *
  * ```
- *  student -> teacher   "BEAM2"                   5 bytes, ASCII
+ *  student -> teacher   "BEAM3"                   5 bytes, ASCII
  *                       u32 len + UTF-8 token     the secret from the QR
+ *                       u32 len + UTF-8 device    who is asking — see below
  *
  *  teacher -> student   u8  status                0 accept, 1 wrong token,
  *                                                 2 the two apps disagree
@@ -46,6 +47,15 @@ import java.security.MessageDigest
  * up, and `ByteArray(that)` is then an out-of-memory crash driven by a stranger
  * on the network. The caps below are what stands between the two.
  *
+ * **The device id is for counting, not for identifying.** The teacher's screen
+ * says how many students have the handout, and they act on that number — they
+ * stop holding the code up. Counting connections made a student who scanned
+ * twice count twice; counting addresses fixed that until a phone rejoined and
+ * DHCP gave it a different one. So each phone sends a random id it made up on
+ * first use. It is not a hardware id and deliberately not `ANDROID_ID`: those
+ * identify a person across apps, which is not what a worksheet count needs, and
+ * this one is meaningless outside the teacher's tally.
+ *
  * **The checksum is not about attackers, it is about truncation.** TCP carries
  * a 16-bit checksum, which is one missed corruption in every 65,000 bad
  * segments — fine for a web page, not fine for a worksheet a student cannot
@@ -64,7 +74,7 @@ object Wire {
    * length that differs is a mismatch the reader notices immediately rather
    * than one it discovers by misparsing the next field.
    */
-  val MAGIC = "BEAM2".toByteArray(Charsets.US_ASCII)
+  val MAGIC = "BEAM3".toByteArray(Charsets.US_ASCII)
 
   const val STATUS_OK = 0
   const val STATUS_BAD_TOKEN = 1
@@ -87,6 +97,9 @@ object Wire {
 
   /** Tokens are 22 base64url characters. This is slack, not a target. */
   const val MAX_TOKEN = 256
+
+  /** A UUID is 36 characters. Same slack, same reason. */
+  const val MAX_DEVICE = 128
 
   /** One file. Matches the picker's own ceiling in `src/lib/attachments.ts`. */
   const val MAX_FILE = 64L * 1024 * 1024

@@ -285,6 +285,7 @@ class BeamModule : Module() {
           host = options.host,
           port = options.port,
           token = options.token,
+          device = deviceId(),
           into = localDir(options.directory),
         ) { index, received, size ->
           sendEvent(
@@ -381,6 +382,24 @@ class BeamModule : Module() {
     return File(path ?: raw.removePrefix("file://"))
   }
 
+  /**
+   * This installation, as a name the teacher's tally can count.
+   *
+   * A random UUID made on first use and kept, deliberately *not* `ANDROID_ID`
+   * or anything derived from the hardware. Those identify a person across every
+   * app on the phone, which is far more than a count of who has the worksheet
+   * needs — and this one means nothing outside the few minutes a teacher is
+   * holding a QR code up. It never leaves the room, and the sending phone keeps
+   * it no longer than the session.
+   */
+  private fun deviceId(): String {
+    val prefs = context.getSharedPreferences("beam", Context.MODE_PRIVATE)
+    prefs.getString(DEVICE_KEY, null)?.let { return it }
+    val fresh = java.util.UUID.randomUUID().toString()
+    prefs.edit().putString(DEVICE_KEY, fresh).apply()
+    return fresh
+  }
+
   private fun stopHost() {
     server?.stop()
     server = null
@@ -433,6 +452,9 @@ class BeamModule : Module() {
 
     /** Includes the student tapping "Connect" in the system dialog. */
     private const val JOIN_TIMEOUT_MS = 45_000
+
+    private const val DEVICE_KEY = "device"
+
   }
 }
 

@@ -54,7 +54,7 @@ const zlib = require('node:zlib');
 
 /* ------------------------------------------------------------------ Wire */
 
-const MAGIC = Buffer.from('BEAM2', 'ascii');
+const MAGIC = Buffer.from('BEAM3', 'ascii');
 const STATUS_OK = 0;
 const STATUS_BAD_TOKEN = 1;
 const STATUS_BAD_VERSION = 2;
@@ -70,6 +70,9 @@ const STATUS_BAD_VERSION = 2;
 const crc32 = (buffer, seed = 0) => zlib.crc32(buffer, seed);
 const MAX_MANIFEST = 256 * 1024;
 const MAX_TOKEN = 256;
+const MAX_DEVICE = 128;
+/** Stands in for the phone's stored id — see `Wire`. Fresh per run is fine. */
+const DEVICE = `beam.js-${process.pid}`;
 const MAX_FILE = 64n * 1024n * 1024n;
 
 /**
@@ -149,6 +152,7 @@ async function pull(host, port, token, into) {
 
   socket.write(MAGIC);
   writeText(socket, token);
+  writeText(socket, DEVICE);
 
   const status = (await readExactly(socket, 1)).readUInt8();
   if (status === STATUS_BAD_TOKEN) throw new Error('Rejected: wrong token');
@@ -254,6 +258,8 @@ function serve(filePaths, { token, quiet } = {}) {
     }
 
     const offered = await readText(socket, MAX_TOKEN);
+    // Read whatever the answer, so the frame stays in step.
+    const device = await readText(socket, MAX_DEVICE);
     if (offered !== token) {
       socket.write(Buffer.from([STATUS_BAD_TOKEN]));
       socket.end();
@@ -263,7 +269,7 @@ function serve(filePaths, { token, quiet } = {}) {
 
     socket.write(Buffer.from([STATUS_OK]));
     writeText(socket, JSON.stringify(manifest));
-    if (!quiet) console.log(`  serving ${files.length} file(s) to ${socket.remoteAddress}`);
+    if (!quiet) console.log(`  serving ${files.length} file(s) to ${socket.remoteAddress} (${device})`);
 
     for (const file of files) {
       const size = Buffer.alloc(8);
@@ -441,7 +447,7 @@ async function selftest() {
   console.log('version:');
   const stale = await new Promise((resolve) => {
     const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
-      socket.write(Buffer.from('CCB1', 'ascii'));
+      socket.write(Buffer.from('BEAM2', 'ascii'));
       socket.write(Buffer.from([0, 0, 0, 0]));
     });
     socket.once('data', (buf) => {
