@@ -65,6 +65,14 @@ export default function HandoutScreen() {
   const insets = useSafeAreaInsets();
 
   const params = useLocalSearchParams<{
+    /**
+     * The handout's identity, minted by whoever sent us here.
+     *
+     * Passed in rather than made here so that re-sharing from the history
+     * updates the same record — and finds the same folder of files — instead
+     * of filing a second copy of last week's worksheet.
+     */
+    id?: string;
     title?: string;
     instructions?: string;
     teacher?: string;
@@ -89,6 +97,8 @@ export default function HandoutScreen() {
    */
   const token = useRef(beamToken()).current;
   const madeAt = useRef(Math.floor(Date.now() / 1000)).current;
+  /** Falls back for a handout opened without one — nothing else depends on it. */
+  const handoutId = useRef(params.id || `${madeAt}-${token.slice(0, 6)}`).current;
 
   const [payload, setPayload] = useState<string | null>(null);
   /**
@@ -194,11 +204,17 @@ export default function HandoutScreen() {
             the question the assignments tab is opened to answer.
           */
           recordHandout({
-            id: `${madeAt}-${token.slice(0, 6)}`,
+            id: handoutId,
             title: assignment.t,
             body: assignment.b,
             sharedAt: madeAt * 1000,
-            files: files.map((f) => ({ name: f.name, size: f.size })),
+            // The uri too, so the history can hand the same files out again.
+            files: files.map((f) => ({
+              name: f.name,
+              size: f.size,
+              uri: f.uri,
+              mime: f.mime,
+            })),
             received: 0,
           });
           tally.current = { started: true, received: 0 };
@@ -234,11 +250,16 @@ export default function HandoutScreen() {
         // record how many phones took the handout.
         if (tally.current.started) {
           recordHandout({
-            id: `${madeAt}-${token.slice(0, 6)}`,
+            id: handoutId,
             title: assignment.t,
             body: assignment.b,
             sharedAt: madeAt * 1000,
-            files: files.map((f) => ({ name: f.name, size: f.size })),
+            files: files.map((f) => ({
+              name: f.name,
+              size: f.size,
+              uri: f.uri,
+              mime: f.mime,
+            })),
             received: tally.current.received,
           });
         }

@@ -328,13 +328,6 @@ export default function Students() {
             onPress={() => router.push('/grades')}
             style={{ marginRight: 8 }}
           />
-          <IconButton
-            name="plusLarge"
-            iconSize={19}
-            tint={color.primary}
-            fg="#fff"
-            onPress={() => router.push('/student/new')}
-          />
         </View>
 
         <View style={styles.search}>
@@ -621,6 +614,23 @@ export default function Students() {
 
         <AlphabetIndex letters={letters} onPick={jumpTo} />
       </View>
+
+      {/*
+        Adding a student, where every other tab keeps its "+".
+
+        It was in the header, a long reach from the thumb and in a different
+        place from the same gesture on Home, Calendar and Messages. Nudged left
+        of the letter rail so it does not sit on top of it — the rail runs the
+        full height of the list on this screen and nothing else does.
+      */}
+      <Press
+        haptic
+        onPress={() => router.push('/student/new')}
+        accessibilityRole="button"
+        accessibilityLabel={t('home.addStudent')}
+        style={[styles.fab, { bottom: bottomInset + 12 }]}>
+        <Icon name="plusLarge" size={23} color="#fff" />
+      </Press>
     </Screen>
   );
 }
@@ -801,6 +811,19 @@ const makeStyles = ({ color, shadow }: Theme) =>
       color: color.mutedLight,
       marginTop: 3,
     },
+    fab: {
+      position: 'absolute',
+      // Clear of the alphabet rail, which the other tabs do not have.
+      right: 34,
+      width: 54,
+      height: 54,
+      borderRadius: radius.fab,
+      backgroundColor: color.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...shadow.fab,
+    },
+
     search: {
       flexDirection: 'row',
       alignItems: 'center',

@@ -216,13 +216,6 @@ export default function Messages() {
                   <Text style={styles.headerLinkLabel}>{t('messages.select')}</Text>
                 </Press>
               ) : null}
-              <IconButton
-                name="plusLarge"
-                iconSize={19}
-                tint={color.primary}
-                fg="#fff"
-                onPress={() => router.push(tab === 'assignments' ? '/assignment' : '/compose')}
-              />
             </View>
           )}
         </View>
@@ -319,6 +312,35 @@ export default function Messages() {
                 title={t('assign.deleteHandoutTitle')}
                 message={t('assign.deleteHandoutHint')}
                 onDelete={() => removeHandout(h.id)}>
+                {/*
+                  Tapping hands it out again.
+
+                  The same id, so it updates this record rather than filing a
+                  second copy, and the same files — `stageForHandout` keeps
+                  them in a folder named by that id for exactly this.
+                */}
+                <Press
+                  onPress={() =>
+                    router.push({
+                      pathname: '/handout',
+                      params: {
+                        id: h.id,
+                        title: h.title,
+                        instructions: h.body,
+                        teacher: useStore.getState().teacherName,
+                        files: JSON.stringify(
+                          h.files
+                            .filter((f) => f.uri)
+                            .map((f) => ({
+                              uri: f.uri,
+                              name: f.name,
+                              mime: f.mime ?? 'application/octet-stream',
+                              size: f.size,
+                            })),
+                        ),
+                      },
+                    })
+                  }>
                 <Card style={styles.handoutCard}>
                   <View style={styles.handoutHead}>
                     <Icon name="qr" size={15} color={color.primary} />
@@ -332,15 +354,19 @@ export default function Messages() {
                       {h.body}
                     </Text>
                   ) : null}
-                  <Text style={styles.handoutMeta}>
-                    {[
-                      h.files.length
-                        ? t('assign.fileCount', { count: h.files.length })
-                        : t('beam.noFiles'),
-                      t('beam.received', { count: h.received }),
-                    ].join(' · ')}
-                  </Text>
+                  <View style={styles.handoutFoot}>
+                    <Text style={styles.handoutMeta}>
+                      {[
+                        h.files.length
+                          ? t('assign.fileCount', { count: h.files.length })
+                          : t('beam.noFiles'),
+                        t('beam.received', { count: h.received }),
+                      ].join(' · ')}
+                    </Text>
+                    <Text style={styles.handoutAgain}>{t('assign.reshare')}</Text>
+                  </View>
                 </Card>
+                </Press>
               </SwipeToDelete>
             ))
           : null}
@@ -417,6 +443,25 @@ export default function Messages() {
           </>
         )}
       </ScrollView>
+
+      {/*
+        The new-message button, where every other tab keeps it.
+
+        It used to sit in the header, which put it a long reach from the thumb
+        and in a different place from the same button on Home and Calendar.
+        Hidden while selecting, because the screen is doing something else then
+        and a floating "+" over a delete flow is an invitation to a mistake.
+      */}
+      {picking ? null : (
+        <Press
+          haptic
+          onPress={() => router.push(tab === 'assignments' ? '/assignment' : '/compose')}
+          accessibilityRole="button"
+          accessibilityLabel={tab === 'assignments' ? t('assign.new') : t('messages.newMessage')}
+          style={[styles.fab, { bottom: bottomInset + 12 }]}>
+          <Icon name="plusLarge" size={23} color="#fff" />
+        </Press>
+      )}
     </Screen>
   );
 }
@@ -557,8 +602,20 @@ function ReplyCard({ reply }: { reply: Reply }) {
   );
 }
 
-const makeStyles = ({ color }: Theme) =>
+const makeStyles = ({ color, shadow }: Theme) =>
   StyleSheet.create({
+    fab: {
+      position: 'absolute',
+      right: 18,
+      width: 54,
+      height: 54,
+      borderRadius: radius.fab,
+      backgroundColor: color.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...shadow.fab,
+    },
+
     /* A handout given out over Wi-Fi, in the assignments list. */
     handoutCard: { padding: 14, marginBottom: 10, gap: 4 },
     handoutHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -571,7 +628,14 @@ const makeStyles = ({ color }: Theme) =>
       color: color.inkSoft,
       marginTop: 4,
     },
-    handoutMeta: { fontFamily: body[500], fontSize: 12, color: color.mutedLight, marginTop: 6 },
+    handoutFoot: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      marginTop: 6,
+    },
+    handoutMeta: { flex: 1, fontFamily: body[500], fontSize: 12, color: color.mutedLight },
+    handoutAgain: { fontFamily: body[700], fontSize: 12, color: color.primary },
 
     notify: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
     notifyTitle: { fontFamily: body[700], fontSize: 14, color: color.ink },

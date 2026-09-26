@@ -31,11 +31,20 @@ export type SharedHandout = {
   body: string;
   /** Epoch milliseconds, when the sharing screen was opened. */
   sharedAt: number;
-  files: { name: string; size: number }[];
+  /**
+   * The files, with where this phone kept its own copy.
+   *
+   * `uri` is what makes a handout re-shareable: the teacher taps last week's
+   * worksheet and it goes out again without hunting through storage for it.
+   * Absent on records written before the copies were kept — those re-open with
+   * their instructions and no files, which is honest about what survived.
+   */
+  files: { name: string; size: number; uri?: string; mime?: string }[];
   /** Phones that had the whole handout when the screen closed. */
   received: number;
 };
 
+/** Shared with `stageForHandout`, which writes each handout's files in here. */
 const ROOT = new Directory(Paths.document, 'handouts-sent');
 const INDEX = new File(ROOT, 'index.json');
 
@@ -81,6 +90,15 @@ export function recordHandout(handout: SharedHandout): void {
   write([handout, ...rest].slice(0, 200));
 }
 
+/**
+ * Forget a handout, and throw away the copies kept for re-sharing.
+ *
+ * The files go with the record. They exist only so the history can hand the
+ * same worksheet out again, so a record nobody kept is a folder nobody wants —
+ * and on a phone with no space to spare, a term of them adds up.
+ */
 export function deleteHandout(id: string): void {
   write(readHandoutLog().filter((h) => h.id !== id));
+  const dir = new Directory(ROOT, id);
+  if (dir.exists) dir.delete();
 }

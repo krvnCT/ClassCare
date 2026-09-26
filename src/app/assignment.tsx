@@ -72,6 +72,15 @@ export default function Assignment() {
   /** The picked file being looked at full-screen, if any. */
   const [viewing, setViewing] = useState<PickedAttachment | null>(null);
   const [instructions, setInstructions] = useState('');
+  /**
+   * The teacher's own words for what this is.
+   *
+   * Empty means "name it after the groups it went to", which is what it always
+   * did and is right most of the time. But a handout with no group ticked was
+   * called "New assignment" for every student who ever received one, and a
+   * teacher sharing one worksheet to a room has no group to name it after.
+   */
+  const [title, setTitle] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
 
   // The instructions box is the last thing on the screen, so it is the one the
@@ -157,6 +166,16 @@ export default function Assignment() {
     }, [recheck]),
   );
 
+  /*
+    What the students see at the top of the handout.
+
+    The teacher's own title wins; the group names are the fallback, because
+    naming a handout after the classes it went to is right whenever there are
+    classes to name.
+  */
+  const handoutTitle =
+    title.trim() || selectedGroups.map((g) => g.name).join(', ') || t('assign.new');
+
   const shareByQr = () => {
     if (busy || beamBlocked) return;
     if (!files.length && !instructions.trim()) {
@@ -177,9 +196,13 @@ export default function Assignment() {
       while the student's transfer died with nothing useful said. `stageForHandout`
       copies each one into the cache while the handle is still valid.
     */
+    // The id is minted here so the files can be filed under it — see
+    // `stageForHandout` — and the handout screen reuses it for the history.
+    const id = `${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
+
     let staged;
     try {
-      staged = stageForHandout(files);
+      staged = stageForHandout(id, files);
     } catch (e) {
       void showAlert(t('beam.title'), describeError(e).message, 'danger');
       return;
@@ -188,10 +211,11 @@ export default function Assignment() {
     router.push({
       pathname: '/handout',
       params: {
+        id,
         // Named after the classes it was set for, which is what a student
         // scanning it sees at the top. Falls back to the app's word for an
         // assignment when no group is ticked, since a handout needs no group.
-        title: selectedGroups.map((g) => g.name).join(', ') || t('assign.new'),
+        title: handoutTitle,
         instructions,
         teacher: useStore.getState().teacherName,
         // Plain `file://` paths in this app's cache — see `stageForHandout`
@@ -345,6 +369,20 @@ export default function Assignment() {
           ) : null}
         </View>
 
+        <Overline style={styles.label}>{t('assign.titleLabel')}</Overline>
+        <Card style={styles.titleCard}>
+          <TextInput
+            value={title}
+            onChangeText={setTitle}
+            placeholder={handoutTitle}
+            placeholderTextColor={color.mutedLight}
+            style={styles.titleInput}
+            selectionColor={color.primary}
+            keyboardAppearance={scheme === 'dark' ? 'dark' : 'light'}
+            maxLength={80}
+          />
+        </Card>
+
         <Overline style={styles.label}>{t('assign.instructions')}</Overline>
         <Card style={styles.editor}>
           <TextInput
@@ -481,6 +519,14 @@ const makeStyles = ({ accents, color }: Theme) =>
 
     /* The same amber as the no-email warning, but inside the footer bar rather
        than in the form, so the bar's own padding places it and it needs none. */
+    titleCard: { paddingHorizontal: 14, paddingVertical: 2, marginBottom: 18 },
+    titleInput: {
+      fontFamily: body[500],
+      fontSize: 15,
+      color: color.ink,
+      paddingVertical: 12,
+    },
+
     beamWarn: {
       flexDirection: 'row',
       gap: 10,

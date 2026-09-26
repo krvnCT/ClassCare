@@ -287,9 +287,9 @@ export function formatBytes(bytes: number): string {
 export type HandoutFile = { uri: string; name: string; mime: string; size: number };
 
 /**
- * Copy the picked files somewhere the native side can read them.
+ * Copy the picked files somewhere the native side can read them, and keep them.
  *
- * ## Why this exists
+ * ## Why the copy exists at all
  *
  * The Storage Access Framework grants access to the *object* the picker
  * returned, not to the `content://` string it carries — the note on
@@ -302,19 +302,23 @@ export type HandoutFile = { uri: string; name: string; mime: string; size: numbe
  *
  * The teacher saw that; the student saw the transfer die. Copying here, while
  * the picker's own handle is still in hand, turns each file into an ordinary
- * `file://` path in this app's cache that anything can open — including a
- * background thread in Kotlin, which is where it is actually read.
+ * `file://` path this app owns — openable by a background thread in Kotlin,
+ * which is where it is actually read.
  *
- * ## Why the cache, and why it is emptied first
+ * ## Why documents, not cache
  *
- * These are copies of files the teacher already has, needed only while the
- * sharing screen is open. The cache is the directory Android reclaims under
- * pressure, which is the correct promise for them. Emptying it at the start of
- * each share stops a term of handouts accumulating on a phone that has no
- * space to spare.
+ * These used to go to the cache and be wiped at the start of every share,
+ * which was right when a handout ended with the screen closing. It is not
+ * right now that the history can re-open one: a teacher tapping last week's
+ * worksheet to hand it out again needs the worksheet, and the cache is the
+ * directory Android empties under pressure.
+ *
+ * One folder per handout, named by its id, so `deleteHandout` removes the
+ * files with the record and nothing accumulates unasked.
  */
-export function stageForHandout(files: PickedAttachment[]): HandoutFile[] {
-  const dir = new Directory(Paths.cache, 'handout');
+export function stageForHandout(id: string, files: PickedAttachment[]): HandoutFile[] {
+  const root = new Directory(Paths.document, 'handouts-sent');
+  const dir = new Directory(root, id);
   if (dir.exists) dir.delete();
   dir.create({ intermediates: true, idempotent: true });
 
