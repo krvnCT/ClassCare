@@ -1,6 +1,6 @@
 # ClassCare — route every request into the proxy.
 #
-# Deploy this beside index.php in the docroot of api.smiletech.dev.
+# Deploy this beside index.php in the docroot of api.iospo.org.
 
 RewriteEngine On
 

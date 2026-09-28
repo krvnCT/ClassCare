@@ -9,7 +9,7 @@ enough.
 ## Shape
 
 ```
-app  ──►  api.smiletech.dev        (Hostinger, reachable)
+app  ──►  api.iospo.org        (Hostinger, reachable)
              │  nginx reverse proxy
              ▼
           epemnrnptzqarfsyvcxs.supabase.co
@@ -35,7 +35,7 @@ way.
 
 Hostinger shared hosting gives no nginx config and no long-lived sockets, so the
 proxy is `deploy/php-proxy/` — `index.php` plus `.htaccess`, dropped into the
-docroot of `api.smiletech.dev`.
+docroot of `api.iospo.org`.
 
 It carries REST, Auth, Storage and Edge Functions. It cannot carry Realtime;
 `subscribeToInbox` detects a non-`supabase.co` host and polls every 30s while
@@ -52,7 +52,7 @@ Two details that decide whether it works at all:
 ## nginx (VPS alternative)
 
 ```nginx
-# /etc/nginx/sites-available/api.smiletech.dev
+# /etc/nginx/sites-available/api.iospo.org
 upstream supabase {
     server epemnrnptzqarfsyvcxs.supabase.co:443;
     keepalive 32;
@@ -66,10 +66,10 @@ map $http_upgrade $connection_upgrade {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name api.smiletech.dev;
+    server_name api.iospo.org;
 
-    ssl_certificate     /etc/letsencrypt/live/api.smiletech.dev/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.smiletech.dev/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/api.iospo.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.iospo.org/privkey.pem;
 
     # Supabase routes by Host, and terminates TLS by SNI. Both must carry the
     # UPSTREAM name, not ours — get either wrong and every request 404s or the
@@ -107,7 +107,7 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    server_name api.smiletech.dev;
+    server_name api.iospo.org;
     return 301 https://$host$request_uri;
 }
 ```
@@ -115,12 +115,12 @@ server {
 ## Setup
 
 ```bash
-# DNS: A record  api.smiletech.dev -> <hostinger ip>   (managed at Vercel today)
+# DNS: A record  api.iospo.org -> <hostinger ip>   (managed at Vercel today)
 
 sudo apt install nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d api.smiletech.dev
+sudo certbot --nginx -d api.iospo.org
 
-sudo ln -s /etc/nginx/sites-available/api.smiletech.dev /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/api.iospo.org /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -128,19 +128,19 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ```bash
 # Should return the same JSON as the direct host.
-curl -s https://api.smiletech.dev/auth/v1/settings -H "apikey: $PUBLISHABLE_KEY" | head -c 200
+curl -s https://api.iospo.org/auth/v1/settings -H "apikey: $PUBLISHABLE_KEY" | head -c 200
 
 # WebSocket upgrade must answer 101, not 200 or 400.
 curl -s -i -N -o /dev/null -w '%{http_code}\n' \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  "https://api.smiletech.dev/realtime/v1/websocket?apikey=$PUBLISHABLE_KEY&vsn=1.0.0"
+  "https://api.iospo.org/realtime/v1/websocket?apikey=$PUBLISHABLE_KEY&vsn=1.0.0"
 ```
 
 ## App change
 
 ```
-EXPO_PUBLIC_SUPABASE_URL=https://api.smiletech.dev
+EXPO_PUBLIC_SUPABASE_URL=https://api.iospo.org
 ```
 
 Rebuild is not required for this — it is read at bundle time by Metro.

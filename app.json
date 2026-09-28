@@ -63,7 +63,8 @@
             }
           ]
         }
-      ]
+      ],
+      "versionCode": 10800
     },
     "web": {
       "output": "static",

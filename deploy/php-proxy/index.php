@@ -12,7 +12,7 @@
  * the app does over HTTP. It CANNOT carry Realtime (WebSockets); see
  * `subscribeToInbox` in the app, which polls when Realtime is unavailable.
  *
- * Deploy: this file + .htaccess into the docroot of api.smiletech.dev
+ * Deploy: this file + .htaccess into the docroot of api.iospo.org
  */
 
 declare(strict_types=1);
