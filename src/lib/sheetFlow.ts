@@ -17,6 +17,7 @@ import { showAlert, showDialog, showError } from '@/components/Dialog';
 import { useStore } from '@/data/store';
 import {
   applyStudentSheet,
+  previewStudentSheet,
   rowsFromFile,
   sampleStudentsXlsx,
   SheetError,
@@ -27,6 +28,7 @@ import type { TranslationKey } from '@/i18n';
 import { translateNow } from '@/i18n/useT';
 import { backupsDirectory } from '@/lib/appFolder';
 import { NoFilePicker, pickOneFile } from '@/lib/filePicker';
+import { termLabel } from '@/lib/term';
 
 const t = (key: TranslationKey, vars?: Record<string, string | number>) =>
   translateNow(key, vars);
@@ -132,13 +134,14 @@ let running = false;
  * carry is edited rather than rebuilt, so they keep their photograph and their
  * colour. A picture is not in a spreadsheet and cannot come back from one.
  */
-export async function importStudentsSheet(): Promise<void> {
+export async function importStudentsSheet({ term }: { term?: string } = {}): Promise<void> {
   if (!useStore.getState().signedIn) {
     await showAlert(t('csv.import'), t('backup.signInFirst'), 'danger');
     return;
   }
   if (running) return;
   running = true;
+  const termName = term ? termLabel(term, translateNow) : '';
 
   try {
     const picked = await pickOneFile([
@@ -167,23 +170,76 @@ export async function importStudentsSheet(): Promise<void> {
       studentsFromRows(rowsFromFile(await picked.result.bytes())),
     );
 
-    const choice = await showDialog({
-      title: t('csv.importTitle'),
-      message: t('csv.importSummary', { count: parsed.length }),
-      tone: 'info',
-      actions: [
-        { label: t('csv.merge'), value: 'merge', intent: 'primary' },
-        { label: t('csv.replace'), value: 'replace', intent: 'danger' },
-        { label: t('common.cancel'), value: 'cancel', intent: 'quiet' },
-      ],
-    });
+    /*
+      Counted before asking, from the same plan the import will follow.
+
+      The number in the question is students, not rows: a file with one row per
+      enrolment has Aman three times, and asking "import 1200 students?" of a
+      file holding 400 reads like something has gone wrong before anything has.
+      For a term, it is also only that term's rows — the rest of the file is
+      not about to be imported, and the teacher should know that first.
+    */
+    const preview = previewStudentSheet(parsed, term);
+
+    if (term && !preview.rows.length) {
+      await showAlert(
+        t('csv.termImportTitle', { term: termName }),
+        [
+          t('csv.termNothing', { term: termName }),
+          preview.otherTerm ? t('csv.otherTermSkipped', { count: preview.otherTerm }) : '',
+          preview.unreadableTerm
+            ? t('csv.unreadableTermSkipped', { count: preview.unreadableTerm })
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+        'danger',
+      );
+      return;
+    }
+
+    /*
+      Into a term, the only choice is whether to go ahead.
+
+      "Replace everyone" is not offered: a file for the summer term says
+      nothing about the students in the autumn one, and letting it remove them
+      would be letting a season's list empty the year.
+    */
+    const choice = term
+      ? await showDialog({
+          title: t('csv.termImportTitle', { term: termName }),
+          message: [
+            t('csv.termImportSummary', { count: preview.rows.length, term: termName }),
+            preview.otherTerm ? t('csv.otherTermSkipped', { count: preview.otherTerm }) : '',
+            preview.unreadableTerm
+              ? t('csv.unreadableTermSkipped', { count: preview.unreadableTerm })
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+          tone: 'info',
+          actions: [
+            { label: t('csv.import'), value: 'merge', intent: 'primary' },
+            { label: t('common.cancel'), value: 'cancel', intent: 'quiet' },
+          ],
+        })
+      : await showDialog({
+          title: t('csv.importTitle'),
+          message: t('csv.importSummary', { count: preview.rows.length }),
+          tone: 'info',
+          actions: [
+            { label: t('csv.merge'), value: 'merge', intent: 'primary' },
+            { label: t('csv.replace'), value: 'replace', intent: 'danger' },
+            { label: t('common.cancel'), value: 'cancel', intent: 'quiet' },
+          ],
+        });
     if (choice !== 'merge' && choice !== 'replace') return;
 
     // The writes themselves. A replace rewrites every student and every group
     // membership, which on a full roster is the longest wait in the app that
     // is not a network call.
     const outcome = await busyWhile(t('csv.saving'), () =>
-      applyStudentSheet(parsed, choice),
+      applyStudentSheet(parsed, choice, { term }),
     );
 
     const lines = [
@@ -205,18 +261,52 @@ export async function importStudentsSheet(): Promise<void> {
       // teacher did not ask for by name, and they should find it in the list
       // rather than discover it.
       outcome.groupsCreated ? t('csv.groupsMade', { count: outcome.groupsCreated }) : '',
+      outcome.groupsAdopted ? t('csv.groupsAdopted', { count: outcome.groupsAdopted }) : '',
       outcome.joined ? t('csv.groupsJoined', { count: outcome.joined }) : '',
       /*
         Only where the file said nothing about classes.
 
         A teacher whose file *did* carry the column has just been told what it
         did, and telling them in the same breath that their students are in no
-        class would be telling them something untrue.
+        class would be telling them something untrue. Into a term it is said
+        either way, for the ones with no class: they are on the roster and not
+        in the term, which is not what importing into a term looks like.
       */
-      outcome.added && !outcome.joined ? t('csv.assignGroups') : '',
+      outcome.added && !outcome.joined
+        ? t('csv.assignGroups')
+        : term && outcome.noClass
+          ? t('csv.noClassInTerm', { count: outcome.noClass })
+          : '',
+      // Duplicates the file itself held — one row per class is a common layout.
+      outcome.mergedInFile ? t('csv.mergedRows', { count: outcome.mergedInFile }) : '',
+      outcome.generated ? t('csv.generatedCodes', { count: outcome.generated }) : '',
+      // Named, because each is a row the teacher has to go and look at.
+      outcome.conflicts.length
+        ? t('csv.conflicts', {
+            count: outcome.conflicts.length,
+            names: namesOf(outcome.conflicts),
+          })
+        : '',
+      outcome.otherTerm ? t('csv.otherTermSkipped', { count: outcome.otherTerm }) : '',
+      outcome.unreadableTerm
+        ? t('csv.unreadableTermSkipped', { count: outcome.unreadableTerm })
+        : '',
+      /*
+        Where the students are now, and where they are going.
+
+        They are on the phone the moment this appears. Reaching the account takes
+        as long as the connection takes, and a teacher who closes the app halfway
+        through an import of hundreds deserves to know the count on the home
+        screen is the thing to watch — not that anything will be lost if they do.
+      */
+      outcome.added + outcome.updated && !useStore.getState().offline ? t('csv.sending') : '',
     ].filter(Boolean);
 
-    await showAlert(t('csv.imported'), lines.join('\n\n'), 'success');
+    await showAlert(
+      term ? t('csv.termImported', { term: termName }) : t('csv.imported'),
+      lines.join('\n\n'),
+      outcome.conflicts.length ? 'info' : 'success',
+    );
   } catch (e) {
     /*
       A platform with no picker is not a bad spreadsheet.
@@ -230,6 +320,13 @@ export async function importStudentsSheet(): Promise<void> {
   } finally {
     running = false;
   }
+}
+
+/** "Aman → Batyr, Maýa → Jeren" and how many more, for the conflict line. */
+function namesOf(conflicts: { name: string; owner: string }[]): string {
+  const shown = conflicts.slice(0, 3).map((c) => `${c.name} → ${c.owner}`);
+  const more = conflicts.length - shown.length;
+  return more > 0 ? `${shown.join(', ')} ${t('common.showMore', { count: more })}` : shown.join(', ');
 }
 
 /**

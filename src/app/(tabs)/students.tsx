@@ -223,6 +223,14 @@ export default function Students() {
     );
   }, [students, allGroups]);
 
+  /** Who is in a running course — the rest is what "no current class" filters to. */
+  const inClass = useMemo(() => {
+    const running = new Set(groups.map((g) => g.id));
+    return new Set(
+      students.filter((s) => s.groupIds.some((id) => running.has(id))).map((s) => s.id),
+    );
+  }, [students, groups]);
+
   /** Schools the teacher actually has. Shared with the sort — see `schoolsOf`. */
   const schools = useMemo(() => schoolsOf(students), [students]);
 
@@ -259,6 +267,7 @@ export default function Students() {
         termsByStudent,
         levelByStudent,
         groupNamesByStudent,
+        inClass,
         t,
       }),
     [
@@ -274,12 +283,38 @@ export default function Students() {
       termsByStudent,
       levelByStudent,
       groupNamesByStudent,
+      inClass,
       t,
     ],
   );
 
   /** Where every cell sits, so the rail can jump to one that has never rendered. */
   const layout = useMemo(() => offsetsFor(sections), [sections]);
+
+  /*
+    Messaging exactly who is on screen.
+
+    A filter is how a teacher says "these people": the girls in the autumn
+    term, everyone at school № 20, the students missing a parent's number. The
+    natural next thing is to tell them something, and the composer's own picker
+    can only choose whole classes. So the list itself is handed over — the same
+    students, in the same order, nobody added and nobody left out.
+
+    Always there, filter or not: with nothing narrowing the list it messages the
+    whole roster, which teachers asked for. Nothing is sent from this button —
+    it only opens the composer, which names who it is for before anything goes.
+  */
+  const shown = useMemo(() => sections.flatMap((s) => s.data), [sections]);
+  const narrowed = activeCount > 0 || query.trim().length > 0;
+  const messageShown = () =>
+    router.push({
+      pathname: '/compose',
+      params: {
+        students: shown.map((s) => s.id).join(','),
+        from: 'filter',
+        ...(narrowed ? {} : { all: '1' }),
+      },
+    });
 
   const letters = useMemo(() => {
     const out: string[] = [];
@@ -375,6 +410,18 @@ export default function Students() {
               <Text style={styles.clearLabel}>{t('students.clearFilters')}</Text>
             </Press>
           ) : null}
+          {shown.length ? (
+            <Press
+              haptic
+              onPress={messageShown}
+              accessibilityRole="button"
+              style={[styles.filterButton, styles.messageButton]}>
+              <Icon name="chat" size={15} color={color.primaryInk} />
+              <Text style={[styles.filterLabel, { color: color.primaryInk }]}>
+                {t('students.messageShown', { count: shown.length })}
+              </Text>
+            </Press>
+          ) : null}
         </View>
       </View>
 
@@ -407,7 +454,11 @@ export default function Students() {
             />
           </FilterRow>
 
-          {terms.length ? (
+          {/*
+            Shown even with no terms: "who is not in a class right now" is the
+            question for a teacher who has only just started adding students.
+          */}
+          {terms.length || inClass.size < students.length ? (
             <FilterRow label={t('groups.term')}>
               <SelectChip
                 height={32}
@@ -424,6 +475,16 @@ export default function Students() {
                   onPress={() => setTerm(key)}
                 />
               ))}
+              {/*
+                Finished or never placed: the students no running course
+                reaches, which is who the composer's class picker cannot.
+              */}
+              <SelectChip
+                height={32}
+                label={t('messages.noCurrentClass')}
+                selected={term === 'none'}
+                onPress={() => setTerm('none')}
+              />
             </FilterRow>
           ) : null}
 
@@ -857,6 +918,12 @@ const makeStyles = ({ color, shadow }: Theme) =>
       backgroundColor: color.surface,
     },
     filterButtonOn: { borderColor: color.primary, backgroundColor: color.primaryTint },
+    // Pushed to the far end of the row, away from the filter controls it acts on.
+    messageButton: {
+      marginLeft: 'auto',
+      borderColor: color.primary,
+      backgroundColor: color.primaryTint,
+    },
     filterLabel: { fontFamily: body[600], fontSize: 13, color: color.inkSoft },
     clearButton: { height: 34, justifyContent: 'center', paddingHorizontal: 8 },
     clearLabel: { fontFamily: body[600], fontSize: 13, color: color.primary },

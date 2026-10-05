@@ -102,6 +102,13 @@ export type StudentRow = {
   /** `male` | `female` | null, where null means not recorded. */
   gender: string | null;
   document_id: string | null;
+  /**
+   * `passport` | `birth_certificate` | `generated`. Optional on the row type as
+   * well as nullable: a project that has not run 0024 returns no such key.
+   */
+  document_kind?: string | null;
+  /** `document_id` normalised by the app for the uniqueness check (0024). */
+  document_key?: string | null;
   parent_name: string | null;
   parent_phone: string | null;
   parent_email: string | null;

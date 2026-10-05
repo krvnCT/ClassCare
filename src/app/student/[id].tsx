@@ -43,6 +43,7 @@ import { callNumber, emailAddress, smsNumber } from '@/lib/contact';
 import { fromKey, longDate, shortDate } from '@/lib/date';
 import { genderOf } from '@/lib/names';
 import { deletePhoto, photoFile, useStudentPhoto } from '@/lib/studentPhoto';
+import { documentLabelKey } from '@/lib/studentDocs';
 import { STATUS_KEY } from '@/app/attendance';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body, text } from '@/theme/type';
@@ -644,7 +645,9 @@ function StudentDetails({ student }: { student: Student }) {
   if (student.school) rows.push({ label: t('student.school'), value: student.school });
   if (student.address) rows.push({ label: t('student.address'), value: student.address });
   if (student.documentId) {
-    rows.push({ label: t('student.documentId'), value: student.documentId });
+    // Named for the document it is, so a code the app made is not read as a
+    // passport number on an exam form.
+    rows.push({ label: t(documentLabelKey(student.documentKind)), value: student.documentId });
   }
   if (student.parentWork) {
     rows.push({

@@ -21,7 +21,9 @@ import type {
 } from '@/data/types';
 import { isLanguage, setActiveLanguage, type Language, type TranslationKey } from '@/i18n';
 import { translateNow } from '@/i18n/useT';
-import { describeError, isOfflineError } from '@/lib/errors';
+import { describeError, isOfflineError, isRetryableServerError } from '@/lib/errors';
+import type { StudentPatch } from '@/data/api';
+import { BATCH, foldIntoBatch, opWeight, splitBatch, touchesSameTarget } from '@/lib/opBatch';
 import {
   deleteRemotePhoto,
   photoFile,
@@ -65,8 +67,23 @@ export type Op =
   | { kind: 'group.update'; id: string; patch: GroupPatch }
   | { kind: 'group.delete'; id: string }
   | { kind: 'student.create'; student: Student }
-  | { kind: 'student.update'; id: string; patch: Partial<Student> }
+  | { kind: 'student.update'; id: string; patch: StudentPatch }
   | { kind: 'student.archive'; id: string }
+  /**
+   * Many creates as one write — see `foldIntoBatch`.
+   *
+   * Never produced on purpose: consecutive `student.create`s fold into one of
+   * these as they are queued, so an import of four hundred is four requests
+   * rather than twelve hundred, and nothing that queues a create has to know.
+   */
+  | { kind: 'student.createMany'; students: Student[] }
+  /**
+   * An import's changes to students it already had. Memberships in it are only
+   * ever added — see `api.updateStudents`.
+   */
+  | { kind: 'student.updateMany'; patches: { id: string; patch: StudentPatch }[] }
+  /** Consecutive archives, folded like creates. */
+  | { kind: 'student.archiveMany'; ids: string[] }
   /**
    * Send a student's picture up and record the path on their row.
    *
@@ -192,6 +209,12 @@ function perform(op: Op): Promise<unknown> {
       return api.updateStudent(op.id, op.patch);
     case 'student.archive':
       return api.archiveStudent(op.id);
+    case 'student.createMany':
+      return api.createStudents(op.students);
+    case 'student.updateMany':
+      return api.updateStudents(op.patches);
+    case 'student.archiveMany':
+      return api.archiveStudents(op.ids);
     case 'student.photo':
       return uploadStudentPhoto(op.id);
     case 'attendance.save': {
@@ -303,7 +326,20 @@ function labelOf(op: Op): string {
  * when the teacher taps Sync. Order is preserved throughout, because a rapid
  * create-then-edit pair applied backwards is worse than either failing.
  */
-type QueuedWrite = { op: Op; attempts: number };
+type QueuedWrite = {
+  op: Op;
+  attempts: number;
+  /**
+   * Times the server answered with a temporary failure. Counted apart from
+   * `attempts`, which also climbs for a dead connection and must never give
+   * up — see `SERVER_RETRIES`. In memory only: a relaunch starting the count
+   * again is one more round of patience, which is the right way to be wrong.
+   */
+  serverAttempts?: number;
+};
+
+/** Temporary server failures one write gets before it is treated as refused. */
+const SERVER_RETRIES = 6;
 
 const queue: QueuedWrite[] = [];
 let draining = false;
@@ -450,7 +486,9 @@ export function useStudentPhotoUploading(studentId: string | undefined | null): 
 }
 
 function publish() {
-  useSyncStatus.getState().report({ pending: queue.length });
+  useSyncStatus
+    .getState()
+    .report({ pending: queue.reduce((n, job) => n + opWeight(job.op), 0) });
 
   const ids = queue
     .filter((job) => job.op.kind === 'student.photo')
@@ -543,6 +581,39 @@ async function drain(): Promise<void> {
           useSyncStatus.getState().report({ offline: true });
           scheduleRetry(job.attempts);
           return;
+        }
+
+        /*
+          The server answered, and the answer was "not now".
+
+          A 503 or 508 from the shared hosting the proxy runs on, a 502 while
+          Supabase restarts, a 429. All of them used to be read as a refusal of
+          the write itself and dropped — which, during an import, dropped
+          students by the dozen for no fault of theirs. They are retried on the
+          same backoff as a dead connection, a bounded number of times: a server
+          that fails the same request for minutes on end is failing *it*, and
+          an unbounded retry would wedge every write behind this one forever.
+        */
+        if (isRetryableServerError(e) && (job.serverAttempts ?? 0) < SERVER_RETRIES) {
+          job.serverAttempts = (job.serverAttempts ?? 0) + 1;
+          scheduleRetry(job.serverAttempts);
+          return;
+        }
+
+        /*
+          A batch refused whole is retried a row at a time.
+
+          One student in a hundred breaking a constraint fails the request for
+          all of them. The rows go back at the head of the queue in their own
+          ops, so the ninety-nine good ones land and only the bad one is
+          reported.
+        */
+        const parts = splitBatch(job.op);
+        if (parts) {
+          queue.splice(0, 1, ...parts.map((op) => ({ op, attempts: 0 })));
+          persistQueue();
+          publish();
+          continue;
         }
 
         // Retrying will not fix a rejected write — a violated constraint, an
@@ -697,20 +768,29 @@ function enqueue(op: Op) {
     if (touchesSameTarget(op, queued.op)) break;
   }
 
-  queue.push({ op, attempts: 0 });
+  /*
+    Onto the last op, if they go together.
+
+    An import queues one create per student, and each was three requests on
+    its own — twelve hundred round trips for four hundred students, minutes of
+    them on these connections, long enough for the phone to kill the app part
+    way and for shared hosting to start refusing the burst. Folded here, the
+    same import is four batches. Only the tail, and only when it is not already
+    on the wire, so nothing is reordered — see `foldIntoBatch`.
+  */
+  const tail = queue.length - 1 >= firstFree ? queue[queue.length - 1] : undefined;
+  const folded = tail ? foldIntoBatch(tail.op, op) : null;
+  if (tail && folded) {
+    tail.op = folded;
+    tail.attempts = 0;
+  } else {
+    queue.push({ op, attempts: 0 });
+  }
   persistQueue();
   publish();
   void drain();
 }
 
-/** Whether two ops are about the same row, whatever they do to it. */
-function touchesSameTarget(a: Op, b: Op): boolean {
-  const idOf = (op: Op): string | null =>
-    'id' in op ? op.id : 'group' in op ? op.group.id : 'student' in op ? op.student.id : null;
-
-  const target = idOf(a);
-  return target !== null && target === idOf(b);
-}
 
 /**
  * Can the server be reached right now?
@@ -1076,6 +1156,24 @@ function reconcileLanguage(remote: string | null) {
   }
 }
 
+/**
+ * A student change in the shape that survives being written to disk.
+ *
+ * In the store a key holding `undefined` means "cleared" — the edit form sends
+ * a blank email that way. `JSON.stringify` deletes such keys, so a change
+ * queued while offline lost every clear on its way into the outbox, and the
+ * server kept the old value and handed it back at the next sync. `null` says
+ * the same thing and survives. Keys that are absent stay absent.
+ */
+function studentForWire(patch: Partial<Student>): StudentPatch {
+  const out: StudentPatch = {};
+  for (const key of Object.keys(patch) as (keyof Student)[]) {
+    const value = patch[key];
+    (out as Record<string, unknown>)[key] = value === undefined ? null : value;
+  }
+  return out;
+}
+
 export const remote: StoreMirror = {
   // No id rewriting here any more: the store mints a UUID and the row is
   // inserted under it, so the id the UI already holds is the real one.
@@ -1089,7 +1187,23 @@ export const remote: StoreMirror = {
   createStudent: (student: Student) => enqueue({ kind: 'student.create', student }),
 
   updateStudent: (id: string, patch: Partial<Student>) =>
-    enqueue({ kind: 'student.update', id, patch }),
+    enqueue({ kind: 'student.update', id, patch: studentForWire(patch) }),
+
+  /*
+    Already a run of changes, so queued as batches directly rather than one op
+    each and folded — an update is never folded into its neighbour, see
+    `foldIntoBatch`.
+  */
+  updateStudents: (patches: { id: string; patch: Partial<Student> }[]) => {
+    for (let i = 0; i < patches.length; i += BATCH) {
+      enqueue({
+        kind: 'student.updateMany',
+        patches: patches
+          .slice(i, i + BATCH)
+          .map(({ id, patch }) => ({ id, patch: studentForWire(patch) })),
+      });
+    }
+  },
 
   archiveStudent: (id: string) => enqueue({ kind: 'student.archive', id }),
 

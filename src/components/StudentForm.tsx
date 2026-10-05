@@ -20,11 +20,18 @@ import { pickContact, pickPhoneNumber } from '@/lib/contactPicker';
 import { Icon } from '@/components/Icon';
 import { Screen, StickyFooter, TopBar, useKeyboardLift } from '@/components/layout';
 import { Button, Card, Divider, FieldRow, Overline, Press, SelectChip } from '@/components/ui';
-import { useAllGroups, useGroups } from '@/data/store';
-import type { Gender, Group, Student } from '@/data/types';
+import { useAllGroups, useGroups, useStudents } from '@/data/store';
+import type { DocumentKind, Gender, Group, Student } from '@/data/types';
 import { baseForLevel, levelOf } from '@/lib/courses';
 import { genderFromSurname, givenOf, joinName, splitName } from '@/lib/names';
 import { ageFrom, fromKey, longDate } from '@/lib/date';
+import {
+  documentKey,
+  documentKindForAge,
+  documentLabelKey,
+  documentOwner,
+  generateCode,
+} from '@/lib/studentDocs';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body } from '@/theme/type';
 
@@ -50,6 +57,7 @@ export type StudentDraft = {
   levelBase?: number;
   gender?: Gender;
   documentId?: string;
+  documentKind?: DocumentKind;
   parentName?: string;
   parentPhone?: string;
   parentEmail?: string;
@@ -81,6 +89,16 @@ const blank = {
   parent2Work: '',
 };
 
+/** Is the number on file a different document from the one the age now calls for? */
+const kindMismatch = (s: Pick<Student, 'birthDate' | 'documentKind'>) => {
+  const byAge = documentKindForAge(s.birthDate);
+  return (
+    !!byAge &&
+    (s.documentKind === 'passport' || s.documentKind === 'birthCertificate') &&
+    s.documentKind !== byAge
+  );
+};
+
 const fieldsOf = (initial: Student | undefined, allGroups: Group[]) => ({
   // Seeded by splitting the stored full name for anyone entered before the
   // surname field existed, which is the same split `surnameOf` reads.
@@ -94,7 +112,19 @@ const fieldsOf = (initial: Student | undefined, allGroups: Group[]) => ({
   // The number a teacher means by "level", not what is stored behind it. Blank
   // for a new student, who has no history for it to be counted from.
   level: initial ? String(levelOf(initial, allGroups)) : '',
-  documentId: initial?.documentId ?? '',
+  /*
+    The field holds a number of the kind the form is asking for, and nothing
+    else. A generated code is not one — it is shown under the field as the
+    thing a real number will replace. Nor is a birth certificate once the
+    student is sixteen and the field is asking for a passport: that one is shown
+    as what is on file, and kept unless a passport is typed over it.
+  */
+  documentId:
+    initial?.documentId &&
+    initial.documentKind !== 'generated' &&
+    !kindMismatch(initial)
+      ? initial.documentId
+      : '',
   parentName: initial?.parentName ?? '',
   parentPhone: initial?.parentPhone ?? '',
   parentEmail: initial?.parentEmail ?? '',
@@ -209,9 +239,70 @@ export function StudentForm({
     Whichever half is missing says so under the button. A disabled control with
     no explanation is indistinguishable from one that does not work.
   */
-  const missing = !form.given.trim() ? 'needName' : !form.surname.trim() ? 'needSurname' : null;
-  const ready = !missing;
+  /*
+    Which document the number is.
+
+    The age decides when there is one: a passport from sixteen, a birth
+    certificate before it — and the field changes its name the moment a birth
+    date is picked. Without a birth date the teacher says which, with the two
+    chips; that choice starts from whatever is already on file.
+  */
+  const students = useStudents();
+  const ageKind = documentKindForAge(birthDate || undefined);
+  const [chosenKind, setChosenKind] = useState<'passport' | 'birthCertificate'>(() =>
+    initial?.documentKind === 'birthCertificate' ? 'birthCertificate' : 'passport',
+  );
+  const kind = ageKind ?? chosenKind;
+  const typedDocument = form.documentId.trim();
+
+  /*
+    No two students with one number.
+
+    A number on file for somebody else is a typo or the same child entered
+    twice, and both are worth stopping for before they are saved: the server
+    refuses the second holder anyway, and that refusal arrives later, as a
+    banner about a student the teacher thought was saved. Compared through
+    `documentKey`, so spacing and case do not hide a duplicate.
+  */
+  const documentHolder = typedDocument ? documentOwner(students, typedDocument, draftId) : undefined;
+
+  /*
+    The number is required for a new student, and is what the field is for.
+
+    Not for an edit of somebody already on file without one — a student
+    imported before this existed, say. Refusing to save a phone number change
+    until a passport is found would make every old student uneditable. They are
+    given a generated code instead, so they too have something unique.
+  */
+  const needsDocument = !initial && !typedDocument;
+
+  const missing = !form.given.trim()
+    ? 'needName'
+    : !form.surname.trim()
+      ? 'needSurname'
+      : needsDocument
+        ? kind === 'passport'
+          ? 'needPassport'
+          : 'needBirthCertificate'
+        : null;
+  const ready = !missing && !documentHolder;
   const groupIds = groups.filter((g) => picked[g.id]).map((g) => g.id);
+
+  /**
+   * The number and kind to save.
+   *
+   * What was typed, as the kind the form is asking for. A blank field keeps
+   * whatever is on file — the old number and its kind, generated or not — and
+   * a student with nothing on file at all is given a code.
+   */
+  const documentFields = (): Pick<StudentDraft, 'documentId' | 'documentKind'> => {
+    if (typedDocument) return { documentId: typedDocument, documentKind: kind };
+    // Nothing at all, rather than the same number again: an edit that only
+    // changed a phone number should not send the document anywhere.
+    if (initial?.documentId) return {};
+    const inUse = new Set(students.map((s) => documentKey(s.documentId)).filter(Boolean));
+    return { documentId: generateCode(inUse), documentKind: 'generated' };
+  };
 
   const trimmed = (v: string) => v.trim() || undefined;
   const draft = (): StudentDraft => ({
@@ -227,7 +318,7 @@ export function StudentForm({
     address: trimmed(form.address),
     school: trimmed(form.school),
     gender,
-    documentId: trimmed(form.documentId),
+    ...documentFields(),
     /*
       Stored as the base, not as the number typed.
 
@@ -485,14 +576,58 @@ export function StudentForm({
               autoCorrect={false}
             />
             <Divider inset={15} />
+            {/*
+              Which document, only when the age cannot say. With a birth date
+              the field simply is the right one — two chips that could be set
+              against the date would be a way to file a passport for a child.
+            */}
+            {ageKind ? null : (
+              <>
+                <View style={styles.genderRow}>
+                  <Text style={styles.dateLabel}>{t('student.documentKind')}</Text>
+                  <View style={styles.genderChips}>
+                    {(['passport', 'birthCertificate'] as const).map((k) => (
+                      <SelectChip
+                        key={k}
+                        height={34}
+                        label={t(documentLabelKey(k))}
+                        selected={chosenKind === k}
+                        onPress={() => setChosenKind(k)}
+                      />
+                    ))}
+                  </View>
+                </View>
+                <Divider inset={15} />
+              </>
+            )}
             <FieldRow
-              label={t('student.documentId')}
-              placeholder={t('common.optional')}
+              label={t(documentLabelKey(kind))}
+              placeholder={initial ? t('student.documentKeep') : t('student.documentRequired')}
               value={form.documentId}
               onChangeText={set('documentId')}
               autoCapitalize="characters"
               autoCorrect={false}
             />
+            <Divider inset={15} />
+            <View style={styles.hintRow}>
+              {/*
+                One line under the field, saying the thing most worth knowing
+                right now: that the number belongs to someone else; or what is
+                on file and what replaces it; or the rule itself.
+              */}
+              <Text style={[styles.hintText, documentHolder && { color: color.danger }]}>
+                {documentHolder
+                  ? t('students.documentTaken', { name: documentHolder.name })
+                  : !typedDocument && initial?.documentKind === 'generated' && initial.documentId
+                    ? t('student.generatedHint', { code: initial.documentId })
+                    : !typedDocument && initial?.documentId && kindMismatch(initial)
+                      ? t('student.documentOnFile', {
+                          label: t(documentLabelKey(initial.documentKind)),
+                          number: initial.documentId,
+                        })
+                      : t('student.documentRule')}
+              </Text>
+            </View>
           </Card>
 
           <Overline style={styles.label}>{t('student.mother')}</Overline>
@@ -599,7 +734,13 @@ export function StudentForm({
 
       <StickyFooter style={{ gap: 10 }}>
         {/* Which half is missing, not merely that something is. */}
-        {missing ? <Text style={styles.blocker}>{t(`students.${missing}`)}</Text> : null}
+        {missing ? (
+          <Text style={styles.blocker}>{t(`students.${missing}`)}</Text>
+        ) : documentHolder ? (
+          <Text style={styles.blocker}>
+            {t('students.documentTaken', { name: documentHolder.name })}
+          </Text>
+        ) : null}
         {secondary ? (
           <Press
             onPress={async () => {

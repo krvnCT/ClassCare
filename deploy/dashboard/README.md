@@ -8,7 +8,7 @@ touching the originals, or the dashboard gets yesterday's code.
 
 | File | Source |
 | --- | --- |
-| `send-message.single-file.ts` | `supabase/functions/send-message/index.ts`, unchanged — it has no local imports |
+| `send-message.single-file.ts` | `supabase/functions/send-message/index.ts` with `_shared/messageVars.ts` inlined |
 | `inbound-email.single-file.ts` | `supabase/functions/inbound-email/index.ts` with `_shared/fcm.ts` inlined |
 | `send-grades.single-file.ts` | `supabase/functions/send-grades/index.ts`, unchanged |
 
@@ -18,12 +18,14 @@ touching the originals, or the dashboard gets yesterday's code.
 ## Regenerating
 
 ```bash
-cp supabase/functions/send-message/index.ts deploy/dashboard/send-message.single-file.ts
 cp supabase/functions/send-grades/index.ts  deploy/dashboard/send-grades.single-file.ts
 ```
 
 For `inbound-email`, paste the body of `_shared/fcm.ts` (minus its imports)
 above the `const json = …` line and delete the `import { sendPush }` line.
+
+For `send-message`, replace its `import … from '../_shared/messageVars.ts'` line
+with the body of that file, `export` keywords removed.
 
 ## Verify JWT — get this right or things break silently
 

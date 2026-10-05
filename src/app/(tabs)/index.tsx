@@ -8,7 +8,7 @@ import { Icon } from '@/components/Icon';
 import { PageHeading, Screen, useTabInset } from '@/components/layout';
 import { SyncPill } from '@/components/SyncPill';
 import { Avatar, Card, EmptyState, IconButton, initialsOf, Press, Txt } from '@/components/ui';
-import { useGroups, useStore, useStudents, useTerms } from '@/data/store';
+import { useAllGroups, useGroups, useStore, useStudents, useTerms } from '@/data/store';
 import type { Group, Student } from '@/data/types';
 import type { TranslationKey } from '@/i18n';
 import { confirm } from '@/components/Dialog';
@@ -17,7 +17,8 @@ import { smsNumber } from '@/lib/contact';
 import { at, countdownTo, longDate, relativeSlot } from '@/lib/date';
 import { nextSessionForGroup, nextSessionOverall, roomLabel } from '@/lib/schedule';
 import { fold, matcherFor } from '@/lib/search';
-import { chosenTerm, compareTerms, termLabel } from '@/lib/term';
+import { importStudentsSheet } from '@/lib/sheetFlow';
+import { chosenTerm, compareTerms, retiredTerms, termLabel } from '@/lib/term';
 import { radius, space, useTheme, useThemedStyles, type Theme } from '@/theme';
 import { body, display, text } from '@/theme/type';
 
@@ -82,6 +83,13 @@ export default function Home() {
     a tap away rather than a scroll away.
   */
   const allTerms = useTerms();
+  /*
+    Archived terms are not listed. Their courses are on the Archive screen,
+    which is where restoring them happens, and an empty "Tomus 2026 · 0" left
+    behind here read as the archive not having worked.
+  */
+  const allGroups = useAllGroups();
+  const retired = useMemo(() => retiredTerms(allGroups), [allGroups]);
 
   const termed = useMemo(() => {
     const buckets = new Map<string, Group[]>();
@@ -97,7 +105,7 @@ export default function Home() {
       Not while searching, though. A search is a question about courses, and
       answering it with a column of empty seasons buries the matches.
     */
-    if (!q) for (const term of allTerms) buckets.set(term, []);
+    if (!q) for (const term of allTerms) if (!retired.has(term)) buckets.set(term, []);
 
     /*
       Courses that state no term go in their own pile rather than into this one.
@@ -124,7 +132,7 @@ export default function Home() {
       .map(([term, list]) => ({ term, groups: list }));
 
     return { terms: sorted, waiting };
-  }, [shown, allTerms, q]);
+  }, [shown, allTerms, retired, q]);
 
   const [openTerms, setOpenTerms] = useState<Record<string, boolean>>({});
 
@@ -340,6 +348,25 @@ export default function Home() {
                       <Text style={[styles.termActionLabel, { color: color.primary }]}>
                         {t('groups.new')}
                       </Text>
+                    </Press>
+
+                    {/*
+                      A class list straight into this term.
+
+                      The file can hold the whole year — a Term column saying
+                      "Tomus" on some rows and "Güýz" on others — and only this
+                      term's rows come in. The classes they name are this term's
+                      classes, made here if they are not here yet, so the same
+                      course name in another season is left alone. Offered on an
+                      empty term too: filling a new intake from a spreadsheet is
+                      the main reason to have one.
+                    */}
+                    <Press
+                      onPress={() => void importStudentsSheet({ term })}
+                      accessibilityLabel={t('term.importHint', { term: termLabel(term, t) })}
+                      style={styles.termAction}>
+                      <Icon name="paperclip" size={13} color={color.mutedLight} />
+                      <Text style={styles.termActionLabel}>{t('term.import')}</Text>
                     </Press>
 
                     {/*

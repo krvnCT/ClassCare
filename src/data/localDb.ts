@@ -310,6 +310,57 @@ export async function loadSnapshot(): Promise<LocalSnapshot> {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Every write to this database, one at a time, in the order they were asked.
+ *
+ * `withTransactionAsync` is not what its name suggests. It is a `BEGIN`, the
+ * task, and a `COMMIT` on the one shared connection — nothing stops a second
+ * caller's statements landing in the middle of it. Two writers use this file
+ * on their own schedules: the store's tables (`persistence.ts`) and the sync
+ * outbox (`sync.ts`). When their transactions overlapped, the second `BEGIN`
+ * failed with "cannot start a transaction within a transaction", and its
+ * `ROLLBACK` then rolled back the *other* writer's half-finished table. The
+ * first writer carried on inserting outside any transaction and failed on its
+ * own `COMMIT`.
+ *
+ * Small writes were over before anything could overlap them, which is why
+ * this hid for so long. An import is not small: rewriting four hundred
+ * students takes long enough that the outbox — busy saving the four hundred
+ * writes the import just queued — lands inside it every time. The screen
+ * showed every student, the database held a fraction of them, and the next
+ * launch believed the database.
+ *
+ * Serialising here rather than in each caller means no new caller can
+ * reintroduce it. Reads stay outside the lane: a read running inside someone
+ * else's transaction sees their uncommitted rows, which is harmless.
+ */
+let lane: Promise<unknown> = Promise.resolve();
+
+function serially<T>(task: () => Promise<T>): Promise<T> {
+  const run = lane.then(task);
+  // The lane moves on whether or not this task failed; the caller still gets
+  // its own rejection from `run`.
+  lane = run.catch(() => {});
+  return run;
+}
+
+/**
+ * Many rows through one prepared statement.
+ *
+ * `runAsync` compiles its SQL on every call. Four hundred students was four
+ * hundred compilations of the same insert, inside a transaction the outbox was
+ * waiting on — preparing once is the cheaper half of the same work.
+ */
+async function insertAll(db: SQLite.SQLiteDatabase, sql: string, rows: SQLite.SQLiteBindParams[]) {
+  if (!rows.length) return;
+  const statement = await db.prepareAsync(sql);
+  try {
+    for (const params of rows) await statement.executeAsync(params);
+  } finally {
+    await statement.finalizeAsync();
+  }
+}
+
+/**
  * Replace a whole collection.
  *
  * Delete-then-insert inside one transaction, rather than working out which
@@ -317,25 +368,28 @@ export async function loadSnapshot(): Promise<LocalSnapshot> {
  * students — the diff costs more to compute than the write costs to perform,
  * and it cannot go wrong the way a missed deletion can.
  */
-export async function replaceCollection(name: Collection, rows: { id: string; value: unknown }[]) {
-  const db = await openLocalDb();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(`delete from ${name}`);
-    for (const row of rows) {
-      await db.runAsync(`insert into ${name} (id, json) values (?, ?)`, [
-        row.id,
-        JSON.stringify(row.value),
-      ]);
-    }
+export function replaceCollection(
+  name: Collection,
+  rows: { id: string; value: unknown }[],
+): Promise<void> {
+  // Serialised before the lane is entered, so the rows written are the ones
+  // asked for — not whatever the caller's array holds by the time it is our turn.
+  const values = rows.map((row) => [row.id, JSON.stringify(row.value)]);
+  return serially(async () => {
+    const db = await openLocalDb();
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(`delete from ${name}`);
+      await insertAll(db, `insert into ${name} (id, json) values (?, ?)`, values);
+    });
   });
 }
 
-export async function writeSetting(key: string, value: unknown) {
-  const db = await openLocalDb();
-  await db.runAsync('insert or replace into settings (key, value) values (?, ?)', [
-    key,
-    JSON.stringify(value),
-  ]);
+export function writeSetting(key: string, value: unknown): Promise<void> {
+  const json = JSON.stringify(value);
+  return serially(async () => {
+    const db = await openLocalDb();
+    await db.runAsync('insert or replace into settings (key, value) values (?, ?)', [key, json]);
+  });
 }
 
 /**
@@ -379,17 +433,15 @@ export async function readOutbox(): Promise<{ seq: number; op: unknown }[]> {
   return out;
 }
 
-export async function replaceOutbox(ops: unknown[]) {
-  const db = await openLocalDb();
+export function replaceOutbox(ops: unknown[]): Promise<void> {
   const now = Date.now();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync('delete from outbox');
-    for (const op of ops) {
-      await db.runAsync('insert into outbox (op, created_at) values (?, ?)', [
-        JSON.stringify(op),
-        now,
-      ]);
-    }
+  const values = ops.map((op) => [JSON.stringify(op), now]);
+  return serially(async () => {
+    const db = await openLocalDb();
+    await db.withTransactionAsync(async () => {
+      await db.runAsync('delete from outbox');
+      await insertAll(db, 'insert into outbox (op, created_at) values (?, ?)', values);
+    });
   });
 }
 
@@ -399,11 +451,13 @@ export async function replaceOutbox(ops: unknown[]) {
  * Used when a different teacher signs in on the same phone. The settings table
  * goes too — it holds their name, their email and their wording.
  */
-export async function clearLocalData() {
-  const db = await openLocalDb();
-  await db.withTransactionAsync(async () => {
-    for (const name of COLLECTIONS) await db.runAsync(`delete from ${name}`);
-    await db.runAsync('delete from settings');
-    await db.runAsync('delete from outbox');
+export function clearLocalData(): Promise<void> {
+  return serially(async () => {
+    const db = await openLocalDb();
+    await db.withTransactionAsync(async () => {
+      for (const name of COLLECTIONS) await db.runAsync(`delete from ${name}`);
+      await db.runAsync('delete from settings');
+      await db.runAsync('delete from outbox');
+    });
   });
 }

@@ -143,6 +143,7 @@ export function buildSections({
   termsByStudent,
   levelByStudent,
   groupNamesByStudent,
+  inClass,
   t,
 }: {
   students: Student[];
@@ -164,6 +165,11 @@ export function buildSections({
    * the maths lot" is a search teachers make constantly.
    */
   groupNamesByStudent?: Map<string, string>;
+  /**
+   * Students in at least one running course. What `term: 'none'` reads: the
+   * ones who have finished, or were never put in a class.
+   */
+  inClass?: Set<string>;
   t: Translate;
 }): Section[] {
   const band = AGE_BANDS.find((b) => b.key === age);
@@ -188,7 +194,9 @@ export function buildSections({
     const known = genderOf(s);
     if (gender === 'none' ? !!known : gender !== 'any' && known !== gender) return false;
 
-    if (term !== 'any' && !termsByStudent.get(s.id)?.has(term)) return false;
+    if (term === 'none') {
+      if (inClass?.has(s.id)) return false;
+    } else if (term !== 'any' && !termsByStudent.get(s.id)?.has(term)) return false;
 
     if (school !== 'any') {
       const key = s.school?.trim() ? schoolKey(s.school) : '';

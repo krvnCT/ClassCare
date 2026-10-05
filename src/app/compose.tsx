@@ -111,6 +111,9 @@ const PARENTS: { key: ParentTarget; labelKey: TranslationKey }[] = [
 
 
 
+/** Names shown in the "to" card before the rest become a count. */
+const FOCUS_SHOWN = 12;
+
 export default function Compose() {
   const t = useT();
   const scroller = useRef<ScrollView>(null);
@@ -133,6 +136,14 @@ export default function Compose() {
     pick?: string;
     /** `1` to open with finished terms already showing. */
     archived?: string;
+    /**
+     * `filter` when `students` is whoever the students tab's filters left on
+     * screen, rather than a register's absentees. Changes what the list of
+     * names is called and which classes the message is about.
+     */
+    from?: string;
+    /** `1` with `from=filter` when nothing was narrowing the list: the whole roster. */
+    all?: string;
   }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -154,10 +165,15 @@ export default function Compose() {
     () => (params.students ? params.students.split(',').filter(Boolean) : []),
     [params.students],
   );
-  const focused = useMemo(
-    () => students.filter((s) => focusIds.includes(s.id)),
-    [focusIds, students],
-  );
+  const focused = useMemo(() => {
+    // A set, because a filtered send can name hundreds — `includes` over that
+    // for every student on the roster was the slowest line on the screen.
+    const wanted = new Set(focusIds);
+    return students.filter((s) => wanted.has(s.id));
+  }, [focusIds, students]);
+
+  /** Students picked by the students tab's filters, not by a register. */
+  const fromFilter = params.from === 'filter' && focusIds.length > 0;
 
   /** The terms the caller asked to open with, if any. */
   const askedTerms = useMemo(
@@ -258,6 +274,22 @@ export default function Compose() {
     for (const g of list) next[g.id] = !whole;
     setPicked(next);
   };
+
+  /*
+    Students no course on offer reaches.
+
+    The picker is made of courses, so a student in none of them could not be
+    messaged from here at all: one never put in a class, one whose classes were
+    deleted, and — with finished terms hidden — everyone whose studies are over.
+    They get a row of their own. Worked out over `offered`, so showing the
+    finished terms moves the graduates back under their old classes and leaves
+    this row with only the ones in no class at all.
+  */
+  const loose = useMemo(() => {
+    const ids = new Set(offered.map((g) => g.id));
+    return students.filter((s) => !s.groupIds.some((id) => ids.has(id)));
+  }, [offered, students]);
+  const [looseOn, setLooseOn] = useState(false);
   const [audience, setAudience] = useState<Audience>(params.audience ?? 'students');
   /*
     Which guardian, when the audience includes them.
@@ -425,12 +457,28 @@ export default function Compose() {
    */
   const viaPhone = deviceSms && channels.sms && hasSupabase;
 
-  // Over what is on screen, so hiding the finished terms also drops them from
-  // the send. A tick the teacher cannot see is a tick they cannot untick.
-  const selectedGroups = useMemo(
-    () => offered.filter((g) => selection[g.id]),
-    [offered, selection],
-  );
+  /*
+    Over what is on screen, so hiding the finished terms also drops them from
+    the send. A tick the teacher cannot see is a tick they cannot untick.
+
+    Except when the caller named the students — a filter, a register's
+    absentees, a birthday. There is no picker then; the people are the
+    selection, and the classes are only what `{group}` and `{time}` are filled
+    from: the one the caller named, else the ones they are in, archived ones
+    too. A student in none is still sent to; their message just names no class.
+    Requiring a class here is what stopped a finished or unplaced student's
+    birthday wish from being sent at all.
+  */
+  const focusMode = focusIds.length > 0;
+  const selectedGroups = useMemo(() => {
+    if (focusMode) {
+      const named = !fromFilter && params.group && allGroups.find((g) => g.id === params.group);
+      if (named) return [named];
+      const theirs = new Set(focused.flatMap((s) => s.groupIds));
+      return allGroups.filter((g) => theirs.has(g.id));
+    }
+    return offered.filter((g) => selection[g.id]);
+  }, [focusMode, fromFilter, params.group, focused, allGroups, offered, selection]);
   // From what this phone actually offers, so the server can never be handed an
   // SMS to send on the teacher's behalf.
   const activeChannels = channelsHere.filter((c) => channels[c.key]);
@@ -442,13 +490,12 @@ export default function Compose() {
    * student. `filter` over the roster rather than a concatenation of the
    * groups' rosters is what makes that true by construction.
    */
-  const targeted = useMemo(
-    () =>
-      focusIds.length
-        ? focused
-        : students.filter((s) => selectedGroups.some((g) => s.groupIds.includes(g.id))),
-    [focusIds.length, focused, students, selectedGroups],
-  );
+  const targeted = useMemo(() => {
+    if (focusMode) return focused;
+    const ids = new Set(selectedGroups.map((g) => g.id));
+    const extra = new Set(looseOn ? loose.map((s) => s.id) : []);
+    return students.filter((s) => s.groupIds.some((id) => ids.has(id)) || extra.has(s.id));
+  }, [focusMode, focused, students, selectedGroups, looseOn, loose]);
 
   /**
    * How many messages this actually is.
@@ -498,20 +545,20 @@ export default function Compose() {
    * something the teacher can see, let alone fix.
    */
   const blocker =
-    selectedGroups.length === 0
-      ? focusIds.length
-        ? t('messages.notInAnyGroup')
-        : t('messages.noGroupSelected')
+    // With named students classes do not matter — see `selectedGroups` — only
+    // whether anyone in the list can be reached on the chosen channels.
+    !focusMode && selectedGroups.length === 0 && !looseOn
+      ? t('messages.noGroupSelected')
       : reach === 0
         ? // A roster with people in it and nobody reachable is a different
           // problem from an empty group, and "this group has no students" sent
           // teachers looking for students who were sitting right there. What is
           // missing is the numbers.
-          targeted.length
+          focusMode || targeted.length
           ? t('messages.nobodyReachable')
-          : selectedGroups.length > 1
-            ? t('messages.groupHasNoStudents', { name: '' }).trim()
-            : t('messages.groupHasNoStudents', { name: selectedGroups[0].name })
+          : selectedGroups.length === 1 && !looseOn
+            ? t('messages.groupHasNoStudents', { name: selectedGroups[0].name })
+            : t('messages.groupHasNoStudents', { name: '' }).trim()
         : activeChannels.length === 0
           ? t('messages.pickChannel')
           : null;
@@ -730,7 +777,7 @@ export default function Compose() {
           try {
             await apiSendMessage({
               groupIds: selectedGroups.map((g) => g.id),
-              studentIds: focusIds.length ? focusIds : undefined,
+              studentIds: targeted.map((s) => s.id),
               audience,
               channels: ['email'],
               body,
@@ -767,9 +814,16 @@ export default function Compose() {
 
     setSending(true);
     try {
+      /*
+        Always the exact list on screen, never "whoever is in these groups".
+        The server would otherwise work the roster out again by itself, from
+        running classes only — so a finished class ticked under "show finished",
+        and the students in no class at all, were dropped there after the
+        composer had counted them in.
+      */
       const report = await apiSendMessage({
         ...payload,
-        studentIds: focusIds.length ? focusIds : undefined,
+        studentIds: targeted.map((s) => s.id),
       });
       useStore.setState({ messages: await fetchMessages() });
 
@@ -855,13 +909,26 @@ export default function Compose() {
           {focusIds.length ? (
             <Card style={styles.focusCard}>
               <View style={styles.focusHead}>
-                <Icon name="warning" size={16} color={color.warningDeep} />
+                <Icon
+                  name={fromFilter ? 'sliders' : 'warning'}
+                  size={16}
+                  color={fromFilter ? color.primary : color.warningDeep}
+                />
                 <Text style={styles.focusTitle}>
-                  {t('messages.absenteesToday', { count: focused.length })}
+                  {fromFilter
+                    ? t(params.all === '1' ? 'messages.allStudents' : 'messages.filteredStudents', {
+                        count: focused.length,
+                      })
+                    : t('messages.absenteesToday', { count: focused.length })}
                 </Text>
               </View>
+              {/*
+                The first few names and a count of the rest. A register's
+                absentees fit; four hundred students from a filter as chips is a
+                screen of names to scroll past to reach the message.
+              */}
               <View style={styles.focusList}>
-                {focused.map((s) => (
+                {focused.slice(0, FOCUS_SHOWN).map((s) => (
                   <View key={s.id} style={styles.focusChip}>
                     <Avatar
                       name={s.name}
@@ -874,6 +941,11 @@ export default function Compose() {
                     <Text style={styles.focusName}>{s.name}</Text>
                   </View>
                 ))}
+                {focused.length > FOCUS_SHOWN ? (
+                  <Text style={styles.focusMore}>
+                    {t('common.showMore', { count: focused.length - FOCUS_SHOWN })}
+                  </Text>
+                ) : null}
               </View>
             </Card>
           ) : (
@@ -939,6 +1011,39 @@ export default function Compose() {
                   </View>
                 );
               })}
+
+              {loose.length ? (
+                <View style={styles.termBlock}>
+                  <Press
+                    haptic
+                    onPress={() => setLooseOn((on) => !on)}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: looseOn }}
+                    style={styles.termHead}>
+                    <View
+                      style={[
+                        styles.termBox,
+                        {
+                          backgroundColor: looseOn ? color.primary : 'transparent',
+                          borderColor: looseOn ? color.primary : color.border,
+                        },
+                      ]}>
+                      {looseOn ? (
+                        <Icon name="check" size={11} color={color.onDark} strokeWidth={2.6} />
+                      ) : null}
+                    </View>
+                    <Text style={styles.termName} numberOfLines={1}>
+                      {t(showArchived ? 'messages.noClass' : 'messages.noCurrentClass')}
+                    </Text>
+                    <Text style={styles.termCount}>
+                      {t('students.count', { count: loose.length })}
+                    </Text>
+                  </Press>
+                  <Text style={styles.looseHint}>
+                    {t(showArchived ? 'messages.noClassHint' : 'messages.noCurrentClassHint')}
+                  </Text>
+                </View>
+              ) : null}
 
               {/*
                 Only where there is something to show. A teacher who has never
@@ -1252,6 +1357,8 @@ const makeStyles = ({ color, accents }: Theme) =>
     },
     termBadgeLabel: { fontFamily: body[700], fontSize: 10, color: color.mutedLight },
     termCount: { marginLeft: 'auto', fontFamily: body[400], fontSize: 12, color: color.mutedLight },
+    // Under the label, past the checkbox: 2 padding + 19 box + 9 gap.
+    looseHint: { fontFamily: body[400], fontSize: 12, color: color.mutedLight, marginLeft: 30 },
 
     archiveToggle: {
       flexDirection: 'row',
@@ -1286,6 +1393,12 @@ const makeStyles = ({ color, accents }: Theme) =>
       paddingVertical: 5,
     },
     focusName: { fontFamily: body[600], fontSize: 12.5, color: color.inkSoft },
+    focusMore: {
+      fontFamily: body[600],
+      fontSize: 12.5,
+      color: color.mutedLight,
+      alignSelf: 'center',
+    },
 
     channelRow: { flexDirection: 'row', gap: 8, marginBottom: 20 },
     channel: {

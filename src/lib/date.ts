@@ -137,6 +137,16 @@ export function addDays(d: Date, n: number) {
   return out;
 }
 
+/**
+ * The same day `n` months on, pulled back to the month's last day where it is
+ * shorter — 31 January to 28 February, not to 3 March.
+ */
+export function addMonths(d: Date, n: number) {
+  const first = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  const last = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  return new Date(first.getFullYear(), first.getMonth(), Math.min(d.getDate(), last));
+}
+
 export function startOfDay(d: Date) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }

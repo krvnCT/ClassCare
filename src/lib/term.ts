@@ -39,6 +39,90 @@ export function parseTerm(term: string | undefined): ParsedTerm | null {
 export const formatTerm = ({ year, season }: ParsedTerm) => `${year}-${season}`;
 
 /**
+ * The beginnings of each season's name, as a teacher types them.
+ *
+ * Stems rather than words, because Turkmen and Russian both inflect: "tomus",
+ * "tomusky"; "лето", "летний", "летняя". All three of the app's languages, plus
+ * the spellings a keyboard without Turkmen letters produces ("gys" for "gyş",
+ * "guyz" for "güýz") — the cell is compared after `foldTerm`, which takes those
+ * letters down to plain Latin anyway.
+ *
+ * "yaz" is spring. It is summer in Turkish, but the people typing this file
+ * write Turkmen, where "ýaz" is spring and summer is "tomus".
+ */
+const SEASON_STEMS: [Season, string[]][] = [
+  ['winter', ['winter', 'gys', 'зим']],
+  ['spring', ['spring', 'yaz', 'весн', 'весен']],
+  ['summer', ['summer', 'tomus', 'лет']],
+  ['autumn', ['autumn', 'fall', 'guyz', 'осен']],
+];
+
+/** Lower case, Turkmen letters taken down to plain Latin, ё to е. */
+function foldTerm(s: string) {
+  const map: Record<string, string> = {
+    ý: 'y', ş: 's', ü: 'u', ö: 'o', ä: 'a', ç: 'c', ň: 'n', ž: 'z', ё: 'е',
+  };
+  let out = '';
+  for (const ch of s.toLowerCase()) out += map[ch] ?? ch;
+  return out;
+}
+
+/** The middle of each season, for choosing the nearest year. */
+const SEASON_MONTH: Record<Season, number> = { winter: 0, spring: 3, summer: 6, autumn: 9 };
+
+/**
+ * A term from a spreadsheet cell: "Summer term", "Tomus 2026", "Лето 2026",
+ * "2026-summer" — or null if no season can be read out of it.
+ *
+ * A year in the cell is used as written. Without one, `context` decides it
+ * when it is the same season — importing "Summer" into the summer 2026 term
+ * means summer 2026, not whichever summer is nearest. Otherwise the occurrence
+ * of that season closest to `today` wins: in October, "winter" is the one about
+ * to start rather than the one nine months gone.
+ *
+ * Only the season name is searched for, as the start of a word. "Summer
+ * intensive B2" reads as summer; "Letter writing" does not read as "лет".
+ */
+export function parseTermCell(
+  cell: string,
+  { today = new Date(), context }: { today?: Date; context?: string } = {},
+): string | null {
+  const raw = cell.trim();
+  if (!raw) return null;
+  if (parseTerm(raw)) return raw;
+
+  const words = foldTerm(raw).split(/[^a-zа-яё0-9]+/);
+  let season: Season | null = null;
+  for (const word of words) {
+    for (const [s, stems] of SEASON_STEMS) {
+      if (stems.some((stem) => word.startsWith(stem))) {
+        season = s;
+        break;
+      }
+    }
+    if (season) break;
+  }
+  if (!season) return null;
+
+  const yearWord = words.find((w) => /^(19|20)\d{2}$/.test(w));
+  if (yearWord) return formatTerm({ year: Number(yearWord), season });
+
+  const inContext = parseTerm(context);
+  if (inContext && inContext.season === season) return context!;
+
+  // The nearest of last year's, this year's and next year's — measured from
+  // the middle of each. December's winter belongs to the next year, which the
+  // month numbers above already account for: winter's middle is January.
+  let best: { year: number; distance: number } | null = null;
+  for (const year of [today.getFullYear() - 1, today.getFullYear(), today.getFullYear() + 1]) {
+    const middle = new Date(year, SEASON_MONTH[season], 15).getTime();
+    const distance = Math.abs(middle - today.getTime());
+    if (!best || distance < best.distance) best = { year, distance };
+  }
+  return formatTerm({ year: best!.year, season });
+}
+
+/**
  * Which term a date falls in.
  *
  * December belongs to the *following* year's winter — a course starting on the
@@ -100,6 +184,27 @@ export function termsInUse(groups: Group[]) {
 export function chosenTerm(group: { term?: string; startsOn?: string }): string | undefined {
   if (group.term) return group.term;
   return group.startsOn ? termOf(group.startsOn) : undefined;
+}
+
+/**
+ * Terms that are over: every course in them archived, none still running.
+ *
+ * Archiving a term files its courses away, and the term itself used to stay on
+ * Home as an empty heading with a zero beside it — kept there by the archived
+ * courses that still carry its key. It belongs in the archive with them. A term
+ * with no courses at all is not in here: that is one being set up, not one that
+ * has finished.
+ */
+export function retiredTerms(
+  groups: { term?: string; startsOn?: string; archivedAt?: string }[],
+): Set<string> {
+  const running = new Set<string>();
+  const filed = new Set<string>();
+  for (const g of groups) {
+    const key = chosenTerm(g);
+    if (key) (g.archivedAt ? filed : running).add(key);
+  }
+  return new Set([...filed].filter((key) => !running.has(key)));
 }
 
 /**

@@ -76,6 +76,16 @@ export type Group = {
 export type Gender = 'male' | 'female';
 
 /**
+ * Which identity document a student's number comes from.
+ *
+ * Decided by age: a passport from sixteen, a birth certificate before it.
+ * `generated` is neither — it is a code the app made up for a student imported
+ * without any document, so that every student still has a unique number to be
+ * told apart by. A teacher replaces it with the real one whenever they have it.
+ */
+export type DocumentKind = 'passport' | 'birthCertificate' | 'generated';
+
+/**
  * A group patch as it travels to the server.
  *
  * The optional dates and the archive stamp are *clearable*, and clearing has to
@@ -130,8 +140,22 @@ export type Student = {
   school?: string;
   /** Absent means not recorded, which the filters treat as its own bucket. */
   gender?: Gender;
-  /** Passport or birth certificate. Free text — the formats differ. */
+  /**
+   * The identity document's number, as the teacher typed it. Free text — the
+   * formats differ, and a pattern here would reject a real document.
+   *
+   * Also the student's identity for imports and for the duplicate check: no
+   * two of a teacher's students share one, compared through `documentKey` so
+   * that "I-AŞ 123456" and "i-aş123456" are the same document.
+   */
   documentId?: string;
+  /**
+   * Which document `documentId` is. See `lib/studentDocs.ts`.
+   *
+   * Absent on students saved before the distinction existed, whose number may
+   * be either — they are shown as a plain "document".
+   */
+  documentKind?: DocumentKind;
 
   /** The first guardian. These three predate the second parent's columns. */
   parentName?: string;

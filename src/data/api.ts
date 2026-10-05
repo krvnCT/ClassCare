@@ -7,6 +7,7 @@ import type {
   Audience,
   CalendarEvent,
   Channel,
+  DocumentKind,
   Grade,
   Group,
   GroupPatch,
@@ -33,6 +34,7 @@ import type {
 import { AppState } from 'react-native';
 
 import { translateNow } from '@/i18n/useT';
+import { documentKey } from '@/lib/studentDocs';
 import { supabase } from '@/lib/supabase';
 
 /**
@@ -81,6 +83,7 @@ const toStudent = (row: StudentRow, groupIds: string[]): Student => ({
   surname: row.surname ?? undefined,
   patronymic: row.patronymic ?? undefined,
   documentId: row.document_id ?? undefined,
+  documentKind: documentKindOf(row.document_kind),
   levelBase: row.level_base ?? undefined,
   parentName: row.parent_name ?? undefined,
   parentPhone: row.parent_phone ?? undefined,
@@ -126,11 +129,100 @@ const toReply = (row: ReplyRow, accent: Reply['accent']): Reply => ({
   unread: row.read_at == null,
 });
 
-/** Supabase returns `{ data, error }`; throw so callers can use try/catch. */
-function unwrap<T>({ data, error }: { data: T | null; error: { message: string } | null }): T {
-  if (error) throw new Error(error.message);
+type PostgrestFailure = {
+  message: string;
+  code?: string;
+  details?: string | null;
+  hint?: string | null;
+};
+
+/**
+ * Supabase returns `{ data, error, status }`; throw so callers can use try/catch.
+ *
+ * The thrown error keeps the HTTP status and the Postgres code. It used to be a
+ * bare `Error(message)`, which threw both away — so the sync queue could not
+ * tell "the proxy is overloaded, try again" (a 503 from shared hosting under a
+ * burst of writes) from "this row breaks a constraint". It treated both as
+ * permanent and dropped the write, which is one of the ways a large import
+ * reached the device and never the account. `describeError` reads `code` and
+ * `status` off whatever it is given, so keeping them is all it takes.
+ */
+function unwrap<T>({
+  data,
+  error,
+  status,
+}: {
+  data: T | null;
+  error: PostgrestFailure | null;
+  status?: number;
+}): T {
+  if (error) {
+    const e = new Error(error.message) as Error & {
+      code?: string;
+      status?: number;
+      details?: string | null;
+    };
+    e.code = error.code;
+    e.status = status;
+    e.details = error.details;
+    throw e;
+  }
   return data as T;
 }
+
+/**
+ * Rows per request when reading a whole table.
+ *
+ * PostgREST answers any request with at most `max_rows` rows — 1000 on every
+ * Supabase project unless somebody changed it — and says nothing about the
+ * rest. Asking for exactly that much keeps each request as large as the server
+ * allows.
+ */
+const PAGE = 1000;
+
+type Page<T> = PromiseLike<{
+  data: T[] | null;
+  error: PostgrestFailure | null;
+  status?: number;
+  count?: number | null;
+}>;
+
+/**
+ * Every row a query matches, however many there are.
+ *
+ * Each read here used to be a single request, and so silently stopped at 1000
+ * rows. That ceiling is not far away for a tutor: 400 students in two or three
+ * courses each is over a thousand memberships, and a term of registers is
+ * thousands of attendance rows. The pull then *replaced* the device's copy with
+ * the truncated one — students lost their courses and vanished from their
+ * terms, registers emptied — some time after an import had reported success.
+ *
+ * The first page asks for the exact count, so a server configured with a lower
+ * limit than `PAGE` is paged correctly too: the loop runs until it holds that
+ * many, not until a page comes back short. Every query passed in must have a
+ * total order (a unique column last), or rows can repeat or go missing at page
+ * boundaries.
+ */
+async function everyRow<T>(page: (from: number, to: number, count: boolean) => Page<T>): Promise<T[]> {
+  const out: T[] = [];
+  let total: number | null = null;
+
+  for (;;) {
+    const result = await page(out.length, out.length + PAGE - 1, total === null);
+    const rows = unwrap(result) ?? [];
+    if (total === null) total = typeof result.count === 'number' ? result.count : -1;
+    out.push(...rows);
+
+    // An empty page ends it whatever the count said: rows deleted while the
+    // pages were being read would otherwise leave this asking forever.
+    if (!rows.length) break;
+    if (total >= 0 ? out.length >= total : rows.length < PAGE) break;
+  }
+  return out;
+}
+
+/** `{ count: 'exact' }` on the first page only — see `everyRow`. */
+const counted = (count: boolean) => (count ? ({ count: 'exact' } as const) : undefined);
 
 /**
  * Who is signed in, without asking the server.
@@ -168,21 +260,56 @@ export async function fetchGroups(): Promise<Group[]> {
       have to be here to read. `useGroups` is what keeps them out of the
       teaching screens.
     */
-    supabase.from('groups').select('*').order('created_at'),
-    supabase.from('group_slots').select('*'),
+    everyRow<GroupRow>((from, to, count) =>
+      supabase
+        .from('groups')
+        .select('*', counted(count))
+        .order('created_at')
+        .order('id')
+        .range(from, to),
+    ),
+    everyRow<GroupSlotRow>((from, to, count) =>
+      supabase.from('group_slots').select('*', counted(count)).order('id').range(from, to),
+    ),
   ]);
-  const groupRows = unwrap(groups);
-  const slotRows = unwrap(slots);
-  return groupRows.map((g) => toGroup(g, slotRows));
+
+  // Indexed once: `toGroup` filtering the whole slot list per group was fine at
+  // ten groups and quadratic at a few hundred.
+  const slotsByGroup = new Map<string, GroupSlotRow[]>();
+  for (const s of slots) {
+    const list = slotsByGroup.get(s.group_id);
+    if (list) list.push(s);
+    else slotsByGroup.set(s.group_id, [s]);
+  }
+  return groups.map((g) => toGroup(g, slotsByGroup.get(g.id) ?? []));
 }
 
 export async function fetchStudents(): Promise<Student[]> {
-  const [students, links] = await Promise.all([
-    supabase.from('students').select('*').is('archived_at', null).order('name'),
-    supabase.from('student_groups').select('student_id, group_id'),
+  const [studentRows, linkRows] = await Promise.all([
+    everyRow<StudentRow>((from, to, count) =>
+      supabase
+        .from('students')
+        .select('*', counted(count))
+        .is('archived_at', null)
+        .order('name')
+        .order('id')
+        .range(from, to),
+    ),
+    /*
+      The table most likely to cross the line first. Every membership is a row,
+      so a few hundred students in two or three courses each is past a thousand
+      — and a truncated answer here does not lose students, it silently takes
+      their courses away, which is worse because they still look present.
+    */
+    everyRow<{ student_id: string; group_id: string }>((from, to, count) =>
+      supabase
+        .from('student_groups')
+        .select('student_id, group_id', counted(count))
+        .order('student_id')
+        .order('group_id')
+        .range(from, to),
+    ),
   ]);
-  const studentRows = unwrap(students);
-  const linkRows = unwrap(links);
 
   const byStudent = new Map<string, string[]>();
   for (const l of linkRows) {
@@ -198,12 +325,20 @@ export async function fetchStudents(): Promise<Student[]> {
  * (`groupId@YYYY-MM-DD#HH:MM`), so the store can merge server rows straight in.
  */
 export async function fetchAttendance(since?: Date): Promise<Record<string, AttendanceRecord>> {
-  let q = supabase.from('attendance').select('*');
-  if (since) q = q.gte('session_date', since.toISOString().slice(0, 10));
+  /*
+    Paged: one row per student per session, so a class of twenty passes a
+    thousand rows inside a term. A single request stopped there, and the pull
+    replaced the device's registers with whatever fitted — the oldest sessions
+    simply emptied.
+  */
+  const rows = await everyRow<AttendanceRow>((from, to, count) => {
+    let q = supabase.from('attendance').select('*', counted(count));
+    if (since) q = q.gte('session_date', since.toISOString().slice(0, 10));
+    return q.order('id').range(from, to);
+  });
 
-  const rows = unwrap(await q);
   const out: Record<string, AttendanceRecord> = {};
-  for (const r of rows as AttendanceRow[]) {
+  for (const r of rows) {
     const key = `${r.group_id}@${r.session_date}#${hhmm(r.starts_at)}`;
     (out[key] ??= {})[r.student_id] = r.status;
   }
@@ -516,9 +651,14 @@ const toEvent = (r: CalendarEventRow): CalendarEvent => ({
 });
 
 export async function fetchEvents(): Promise<CalendarEvent[]> {
-  const rows = unwrap(
-    await supabase.from('calendar_events').select('*').order('event_date'),
-  ) as CalendarEventRow[];
+  const rows = await everyRow<CalendarEventRow>((from, to, count) =>
+    supabase
+      .from('calendar_events')
+      .select('*', counted(count))
+      .order('event_date')
+      .order('id')
+      .range(from, to),
+  );
   return rows.map(toEvent);
 }
 
@@ -652,109 +792,264 @@ export async function deleteGroup(id: string) {
   unwrap(await supabase.from('groups').delete().eq('id', id).eq('teacher_id', teacherId));
 }
 
-/** Insert under the store's id — see `createGroup` for why. */
-export async function createStudent(student: Student): Promise<Student> {
-  const teacherId = await requireUser();
+/* -------------------------------------------------------------------------- */
+/* Students                                                                   */
+/* -------------------------------------------------------------------------- */
 
-  const row = unwrap(
-    await supabase
-      .from('students')
-      // Upsert rather than insert: a create can be replayed — a queued write
-      // retried after a timeout that actually succeeded, or a row arriving from
-      // an imported backup the server already has — and a duplicate key error
-      // would stall the queue behind it.
-      .upsert({
-        id: student.id,
-        teacher_id: teacherId,
-        name: student.name,
-        phone: student.phone,
-        email: student.email ?? null,
-        birth_date: student.birthDate ?? null,
-        address: student.address ?? null,
-        school: student.school ?? null,
-        gender: student.gender ?? null,
-        surname: student.surname ?? null,
-        patronymic: student.patronymic ?? null,
-        document_id: student.documentId ?? null,
-        level_base: student.levelBase ?? 0,
-        parent_name: student.parentName ?? null,
-        parent_phone: student.parentPhone ?? null,
-        parent_email: student.parentEmail ?? null,
-        parent_work: student.parentWork ?? null,
-        parent2_name: student.parent2Name ?? null,
-        parent2_phone: student.parent2Phone ?? null,
-        parent2_email: student.parent2Email ?? null,
-        parent2_work: student.parent2Work ?? null,
-        accent: student.accent,
-        photo_path: student.photoPath ?? null,
-        note: student.note ?? null,
-      })
-      .select()
-      .single(),
-  ) as StudentRow;
+/**
+ * A change to a student as it travels to the server.
+ *
+ * A key that is present is a statement about that column: a value sets it, and
+ * `null` clears it. `undefined` used to mean "clear" in the store and "leave
+ * alone" here, so clearing a field on the edit form emptied it on the phone and
+ * left it on the server — and the next sync put it back. `null` is used on the
+ * wire because a queued change is written to disk with `JSON.stringify`, which
+ * drops `undefined` keys entirely. See `studentForWire` in the store.
+ */
+export type StudentPatch = { [K in keyof Student]?: Student[K] | null };
 
-  // Cleared first, and de-duplicated, for the same reason `createGroup` clears
-  // its slots: a create can be replayed — a retry after a timeout that actually
-  // succeeded, or a row from an imported backup — and inserting the same
-  // (student, group) pair twice is a duplicate key error that fails the whole
-  // student, not just the link.
-  unwrap(await supabase.from('student_groups').delete().eq('student_id', row.id));
+/** Domain field to column, for every column the app writes as it is. */
+const STUDENT_COLUMNS = [
+  ['name', 'name'],
+  ['phone', 'phone'],
+  ['email', 'email'],
+  ['birthDate', 'birth_date'],
+  ['address', 'address'],
+  ['school', 'school'],
+  ['gender', 'gender'],
+  ['surname', 'surname'],
+  ['patronymic', 'patronymic'],
+  ['documentId', 'document_id'],
+  ['levelBase', 'level_base'],
+  ['parentName', 'parent_name'],
+  ['parentPhone', 'parent_phone'],
+  ['parentEmail', 'parent_email'],
+  ['parentWork', 'parent_work'],
+  ['parent2Name', 'parent2_name'],
+  ['parent2Phone', 'parent2_phone'],
+  ['parent2Email', 'parent2_email'],
+  ['parent2Work', 'parent2_work'],
+  ['accent', 'accent'],
+  ['photoPath', 'photo_path'],
+  ['note', 'note'],
+] as const satisfies readonly (readonly [keyof Student, string])[];
 
-  const groupIds = [...new Set(student.groupIds)];
-  if (groupIds.length) {
-    unwrap(
-      await supabase
-        .from('student_groups')
-        .insert(
-          groupIds.map((group_id) => ({
-            student_id: row.id,
-            group_id,
-            teacher_id: teacherId,
-          })),
-        )
-        .select(),
-    );
-  }
+const DOCUMENT_KIND_COLUMN: Record<DocumentKind, string> = {
+  passport: 'passport',
+  birthCertificate: 'birth_certificate',
+  generated: 'generated',
+};
 
-  return { ...student, id: row.id };
+const documentKindOf = (value: string | null | undefined): DocumentKind | undefined =>
+  value === 'passport'
+    ? 'passport'
+    : value === 'birth_certificate'
+      ? 'birthCertificate'
+      : value === 'generated'
+        ? 'generated'
+        : undefined;
+
+/**
+ * Students per request.
+ *
+ * A hundred rows is around fifty kilobytes of JSON — one request a teacher on a
+ * slow connection can still finish — where a student at a time was three round
+ * trips each, twelve hundred for an import of four hundred, through a proxy on
+ * shared hosting that starts refusing a burst like that long before it ends.
+ */
+const WRITE_CHUNK = 100;
+
+/**
+ * Ids per `in.(…)` filter.
+ *
+ * That filter travels in the URL, and a UUID with its percent-encoded comma is
+ * about forty characters. A hundred keeps the request line near four kilobytes,
+ * comfortably under the eight most servers stop reading at.
+ */
+const ID_CHUNK = 100;
+
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
-export async function updateStudent(id: string, patch: Partial<Student>) {
-  unwrap(
-    await supabase
-      .from('students')
-      .update({
-        ...(patch.name !== undefined && { name: patch.name }),
-        ...(patch.phone !== undefined && { phone: patch.phone }),
-        ...(patch.email !== undefined && { email: patch.email ?? null }),
-        ...(patch.parentName !== undefined && {
-          parent_name: patch.parentName ?? null,
-        }),
-        ...(patch.parentPhone !== undefined && {
-          parent_phone: patch.parentPhone ?? null,
-        }),
-        ...(patch.parentEmail !== undefined && {
-          parent_email: patch.parentEmail ?? null,
-        }),
-        ...(patch.birthDate !== undefined && { birth_date: patch.birthDate ?? null }),
-        ...(patch.address !== undefined && { address: patch.address ?? null }),
-        ...(patch.school !== undefined && { school: patch.school ?? null }),
-        ...('gender' in patch && { gender: patch.gender ?? null }),
-        ...(patch.surname !== undefined && { surname: patch.surname ?? null }),
-        ...(patch.patronymic !== undefined && { patronymic: patch.patronymic ?? null }),
-        ...(patch.documentId !== undefined && { document_id: patch.documentId ?? null }),
-        ...(patch.levelBase !== undefined && { level_base: patch.levelBase }),
-        ...(patch.parentWork !== undefined && { parent_work: patch.parentWork ?? null }),
-        ...(patch.parent2Name !== undefined && { parent2_name: patch.parent2Name ?? null }),
-        ...(patch.parent2Phone !== undefined && { parent2_phone: patch.parent2Phone ?? null }),
-        ...(patch.parent2Email !== undefined && { parent2_email: patch.parent2Email ?? null }),
-        ...(patch.parent2Work !== undefined && { parent2_work: patch.parent2Work ?? null }),
-        ...(patch.note !== undefined && { note: patch.note ?? null }),
-        ...(patch.photoPath !== undefined && { photo_path: patch.photoPath ?? null }),
-      })
-      .eq('id', id)
-      .select(),
+/**
+ * Whether the server has the two columns from migration 0024.
+ *
+ * Assumed until a write proves otherwise, and then never sent again in this
+ * session. A project where the migration has not been run yet would otherwise
+ * refuse every student the app saves — new ones, edits, imports — over two
+ * columns it can live without until somebody runs it. The number itself is in
+ * `document_id`, which has been there since 0014, so nothing is lost but the
+ * kind and the uniqueness check.
+ */
+let documentColumns = true;
+
+/**
+ * "This column does not exist", and only that.
+ *
+ * Matching the column name alone would also catch the unique index — its name
+ * contains `document_key` — and a duplicate would then be retried without the
+ * key and go through, which is the one thing the index is there to stop.
+ */
+function missingDocumentColumns(e: unknown): boolean {
+  const code = (e as { code?: string } | null)?.code;
+  const text = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  if (!/document_(kind|key)/.test(text)) return false;
+  return (
+    code === 'PGRST204' ||
+    code === '42703' ||
+    text.includes('schema cache') ||
+    text.includes('does not exist')
   );
+}
+
+async function withDocumentColumns(write: (withDocs: boolean) => Promise<void>) {
+  if (!documentColumns) return write(false);
+  try {
+    await write(true);
+  } catch (e) {
+    if (!missingDocumentColumns(e)) throw e;
+    documentColumns = false;
+    console.warn(
+      '[classcare] the server has no document_kind/document_key yet — run migration 0024. ' +
+        'Saving without them.',
+    );
+    await write(false);
+  }
+}
+
+/** A whole student as a row, for inserting. Every column is written. */
+function studentRow(student: Student, teacherId: string, withDocs: boolean) {
+  return {
+    id: student.id,
+    teacher_id: teacherId,
+    name: student.name,
+    phone: student.phone ?? '',
+    email: student.email ?? null,
+    birth_date: student.birthDate ?? null,
+    address: student.address ?? null,
+    school: student.school ?? null,
+    gender: student.gender ?? null,
+    surname: student.surname ?? null,
+    patronymic: student.patronymic ?? null,
+    document_id: student.documentId ?? null,
+    ...(withDocs && {
+      document_kind: student.documentKind ? DOCUMENT_KIND_COLUMN[student.documentKind] : null,
+      document_key: documentKey(student.documentId) || null,
+    }),
+    level_base: student.levelBase ?? 0,
+    parent_name: student.parentName ?? null,
+    parent_phone: student.parentPhone ?? null,
+    parent_email: student.parentEmail ?? null,
+    parent_work: student.parentWork ?? null,
+    parent2_name: student.parent2Name ?? null,
+    parent2_phone: student.parent2Phone ?? null,
+    parent2_email: student.parent2Email ?? null,
+    parent2_work: student.parent2Work ?? null,
+    accent: student.accent,
+    photo_path: student.photoPath ?? null,
+    note: student.note ?? null,
+  };
+}
+
+/**
+ * The columns a change mentions, and nothing else.
+ *
+ * Tested with `in`, so a present key with no value clears its column — see
+ * `StudentPatch`. The three columns that may not be null are the exception:
+ * a name is never cleared, a phone clears to empty and a level to zero.
+ */
+function patchColumns(patch: StudentPatch, withDocs: boolean): Partial<StudentRow> {
+  const out: Record<string, unknown> = {};
+
+  for (const [field, column] of STUDENT_COLUMNS) {
+    if (!(field in patch)) continue;
+    const value = patch[field];
+    if (field === 'name' || field === 'accent') {
+      if (value) out[column] = value;
+    } else if (field === 'phone') {
+      out.phone = value ?? '';
+    } else if (field === 'levelBase') {
+      out.level_base = value ?? 0;
+    } else {
+      out[column] = value ?? null;
+    }
+  }
+
+  if (withDocs) {
+    if ('documentId' in patch) out.document_key = documentKey(patch.documentId) || null;
+    if ('documentKind' in patch) {
+      out.document_kind = patch.documentKind ? DOCUMENT_KIND_COLUMN[patch.documentKind] : null;
+    }
+  }
+  // Built loosely because the column is chosen at run time; every key it can
+  // hold is a `StudentRow` column from the table above.
+  return out as Partial<StudentRow>;
+}
+
+/** Insert under the store's id — see `createGroup` for why. */
+export async function createStudent(student: Student): Promise<void> {
+  await createStudents([student]);
+}
+
+/**
+ * Insert or overwrite students, a hundred at a time, and set exactly their
+ * memberships.
+ *
+ * Upsert rather than insert: a create can be replayed — a queued write retried
+ * after a timeout that actually succeeded, or a row arriving from an imported
+ * backup the server already has — and a duplicate key error would stall the
+ * queue behind it.
+ *
+ * No `select()` after the write. Asking for the rows back doubled every
+ * response for nothing: the device minted the ids and already holds the rows.
+ */
+export async function createStudents(students: Student[]): Promise<void> {
+  if (!students.length) return;
+  const teacherId = await requireUser();
+
+  await withDocumentColumns(async (withDocs) => {
+    for (const chunk of chunked(students, WRITE_CHUNK)) {
+      unwrap(
+        await supabase
+          .from('students')
+          .upsert(
+            chunk.map((s) => studentRow(s, teacherId, withDocs)),
+            { onConflict: 'id' },
+          ),
+      );
+    }
+  });
+
+  // Cleared first, and de-duplicated, for the same reason `createGroup` clears
+  // its slots: a create can be replayed, and inserting the same (student,
+  // group) pair twice is a duplicate key error that fails the whole batch.
+  for (const ids of chunked(students.map((s) => s.id), ID_CHUNK)) {
+    unwrap(await supabase.from('student_groups').delete().in('student_id', ids));
+  }
+
+  const links = students.flatMap((s) =>
+    [...new Set(s.groupIds)].map((group_id) => ({
+      student_id: s.id,
+      group_id,
+      teacher_id: teacherId,
+    })),
+  );
+  for (const chunk of chunked(links, WRITE_CHUNK * 5)) {
+    unwrap(await supabase.from('student_groups').insert(chunk));
+  }
+}
+
+export async function updateStudent(id: string, patch: StudentPatch) {
+  await withDocumentColumns(async (withDocs) => {
+    const fields = patchColumns(patch, withDocs);
+    // Nothing but memberships is a common change — a roster edit — and an
+    // update with an empty body is a request with nothing to say.
+    if (!Object.keys(fields).length) return;
+    unwrap(await supabase.from('students').update(fields).eq('id', id).select('id'));
+  });
 
   if (patch.groupIds) {
     const teacherId = await requireUser();
@@ -779,15 +1074,89 @@ export async function updateStudent(id: string, patch: Partial<Student>) {
   }
 }
 
+/**
+ * Many students' changes in a handful of requests, and memberships only ever
+ * added.
+ *
+ * What an import sends. Each row's changes are written as an upsert of just
+ * those columns: PostgREST updates exactly the columns the payload names, so a
+ * file that says nothing about photographs cannot touch one. An upsert writes
+ * every column it names on every row, though, so rows are grouped by which
+ * columns they carry — a row with no email in the file must not be sent beside
+ * one that has, or its email would be written as null.
+ *
+ * An upsert inserts a row that is missing, and the server may be missing one:
+ * a student whose create was refused before this fix exists on the phone and
+ * nowhere else. That needs a name and a phone, which every import row carries;
+ * a change without them is sent as a plain update instead.
+ *
+ * Memberships are inserted and duplicates ignored, never cleared and rewritten.
+ * An import adds a student to classes and has no business removing them from
+ * any, including ones joined on another phone that this one has not heard of.
+ */
+export async function updateStudents(
+  patches: { id: string; patch: StudentPatch }[],
+): Promise<void> {
+  if (!patches.length) return;
+  const teacherId = await requireUser();
+
+  await withDocumentColumns(async (withDocs) => {
+    const bySignature = new Map<string, Partial<StudentRow>[]>();
+    const loose: { id: string; fields: Partial<StudentRow> }[] = [];
+
+    for (const { id, patch } of patches) {
+      const fields = patchColumns(patch, withDocs);
+      if (!Object.keys(fields).length) continue;
+      if (!('name' in fields) || !('phone' in fields)) {
+        loose.push({ id, fields });
+        continue;
+      }
+      const row: Partial<StudentRow> = { id, teacher_id: teacherId, ...fields };
+      const signature = Object.keys(row).sort().join(',');
+      const list = bySignature.get(signature);
+      if (list) list.push(row);
+      else bySignature.set(signature, [row]);
+    }
+
+    for (const rows of bySignature.values()) {
+      for (const chunk of chunked(rows, WRITE_CHUNK)) {
+        unwrap(await supabase.from('students').upsert(chunk, { onConflict: 'id' }));
+      }
+    }
+    for (const { id, fields } of loose) {
+      unwrap(await supabase.from('students').update(fields).eq('id', id).select('id'));
+    }
+  });
+
+  const links = patches.flatMap(({ id, patch }) =>
+    patch.groupIds
+      ? [...new Set(patch.groupIds)].map((group_id) => ({
+          student_id: id,
+          group_id,
+          teacher_id: teacherId,
+        }))
+      : [],
+  );
+  for (const chunk of chunked(links, WRITE_CHUNK * 5)) {
+    unwrap(
+      await supabase
+        .from('student_groups')
+        .upsert(chunk, { onConflict: 'student_id,group_id', ignoreDuplicates: true }),
+    );
+  }
+}
+
 /** Soft delete — history stays intact so past attendance still adds up. */
 export async function archiveStudent(id: string) {
-  unwrap(
-    await supabase
-      .from('students')
-      .update({ archived_at: new Date().toISOString() })
-      .eq('id', id)
-      .select(),
-  );
+  await archiveStudents([id]);
+}
+
+/** Many at once, for a replacing import that removes a roster's worth. */
+export async function archiveStudents(ids: string[]): Promise<void> {
+  const at = new Date().toISOString();
+  for (const chunk of chunked(ids, ID_CHUNK)) {
+    unwrap(await supabase.from('students').update({ archived_at: at }).in('id', chunk));
+  }
 }
 
 /**
@@ -1287,9 +1656,14 @@ const toTemplate = (row: MessageTemplateRow): MessageTemplate => ({
 });
 
 export async function fetchTemplates(): Promise<MessageTemplate[]> {
-  const rows = unwrap(
-    await supabase.from('message_templates').select('*').order('created_at'),
-  ) as MessageTemplateRow[];
+  const rows = await everyRow<MessageTemplateRow>((from, to, count) =>
+    supabase
+      .from('message_templates')
+      .select('*', counted(count))
+      .order('created_at')
+      .order('id')
+      .range(from, to),
+  );
   return rows.map(toTemplate);
 }
 
@@ -1359,14 +1733,22 @@ const toGrade = (row: GradeRow): Grade => ({
 });
 
 export async function fetchAssessments(): Promise<Assessment[]> {
-  const rows = unwrap(
-    await supabase.from('assessments').select('*').order('taken_on', { ascending: false }),
-  ) as AssessmentRow[];
+  const rows = await everyRow<AssessmentRow>((from, to, count) =>
+    supabase
+      .from('assessments')
+      .select('*', counted(count))
+      .order('taken_on', { ascending: false })
+      .order('id')
+      .range(from, to),
+  );
   return rows.map(toAssessment);
 }
 
+/** Paged for the same reason as attendance: a mark per student per test. */
 export async function fetchGrades(): Promise<Grade[]> {
-  const rows = unwrap(await supabase.from('grades').select('*')) as GradeRow[];
+  const rows = await everyRow<GradeRow>((from, to, count) =>
+    supabase.from('grades').select('*', counted(count)).order('id').range(from, to),
+  );
   return rows.map(toGrade);
 }
 
@@ -1427,9 +1809,14 @@ const toAssessmentType = (row: AssessmentTypeRow): AssessmentType => ({
 });
 
 export async function fetchAssessmentTypes(): Promise<AssessmentType[]> {
-  const rows = unwrap(
-    await supabase.from('assessment_types').select('*').order('position'),
-  ) as AssessmentTypeRow[];
+  const rows = await everyRow<AssessmentTypeRow>((from, to, count) =>
+    supabase
+      .from('assessment_types')
+      .select('*', counted(count))
+      .order('position')
+      .order('id')
+      .range(from, to),
+  );
   return rows.map(toAssessmentType);
 }
 

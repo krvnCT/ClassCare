@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   runOnJS,
@@ -20,6 +20,7 @@ import { useEvents, useGroups, useStudents } from '@/data/store';
 import type { CalendarEvent, Group, Session } from '@/data/types';
 import {
   addDays,
+  addMonths,
   dowLong,
   dowShort,
   fromKey,
@@ -55,6 +56,12 @@ const phaseBadge = ({ color, status }: Theme) =>
 /** Height of one row of day cells. The grid animates between 1 and 6 of these. */
 const ROW_H = 62;
 const ROWS = 6;
+/** How far the grid travels between closed and open — the drag maps onto this. */
+const SPAN = (ROWS - 1) * ROW_H;
+/** A sideways swipe turns the page past this many points… */
+const PAGE_DISTANCE = 56;
+/** …or when let go faster than this, in points a second. Same for a flick open. */
+const FLICK = 600;
 
 /** A class session or a personal event, ordered together on the day timeline. */
 type Entry =
@@ -99,26 +106,109 @@ export default function Calendar() {
     return i < 0 ? 0 : i;
   }, [matrix, selected]);
 
+  /** 0 is the week strip, 1 the whole month; anything between while dragged. */
   const progress = useSharedValue(0);
-  useEffect(() => {
-    progress.value = withTiming(monthMode ? 1 : 0, { duration: 240 });
-  }, [monthMode, progress]);
+  /** Where `progress` stood when the finger went down. */
+  const dragFrom = useSharedValue(0);
+  /** Sideways offset of the days, following a swipe and sliding a new page in. */
+  const slide = useSharedValue(0);
+  const { width } = useWindowDimensions();
+  /** Far enough for a page to have left; the days are invisible by here. */
+  const shift = width / 3;
+
+  const setOpen = useCallback(
+    (open: boolean) => {
+      setMonthMode(open);
+      progress.value = withTiming(open ? 1 : 0, { duration: 240 });
+    },
+    [progress],
+  );
 
   const gridStyle = useAnimatedStyle(() => ({
-    height: ROW_H + (ROWS - 1) * ROW_H * progress.value,
+    height: ROW_H + SPAN * progress.value,
   }));
   const innerStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -selectedRow * ROW_H * (1 - progress.value) }],
+    opacity: 1 - Math.min(1, Math.abs(slide.value) / shift),
+    transform: [
+      { translateX: slide.value },
+      { translateY: -selectedRow * ROW_H * (1 - progress.value) },
+    ],
   }));
 
-  // Drag the strip down to open the month, up to close it. A tap on the
-  // grabber does the same, so the gesture is discoverable rather than hidden.
-  const pan = Gesture.Pan()
-    .activeOffsetY([-12, 12])
+  /*
+    Turning the page: a week at a time, or a month once the grid is open.
+
+    The days are parked out of sight on the side the new page comes from
+    *before* `selected` changes, so the next render lands invisible and the
+    layout effect below slides it into place. Setting the offset afterwards
+    left a frame of the new week sitting where the old one had been.
+  */
+  const arriving = useRef(false);
+  const turn = useCallback(
+    (dir: number) => {
+      slide.value = dir * shift;
+      arriving.current = true;
+      setSelected((d) => (monthMode ? addMonths(d, dir) : addDays(d, dir * 7)));
+    },
+    [monthMode, shift, slide],
+  );
+  useLayoutEffect(() => {
+    if (!arriving.current) return;
+    arriving.current = false;
+    slide.value = withTiming(0, { duration: 200 });
+  }, [selected, slide]);
+
+  /*
+    The grid follows the finger.
+
+    Down opens the month and up folds it back to the week, tracking the drag
+    point for point rather than waiting to be let go — the old version only
+    acted on release, which read as nothing happening. Let go past halfway, or
+    with a flick, and it finishes the move; short of that it settles back.
+
+    Sideways turns the page. Each gesture refuses once the finger has clearly
+    gone the other way, so a diagonal drag does one thing, not both. A tap on
+    the grabber still opens and closes it for anyone who never drags.
+  */
+  const drag = Gesture.Pan()
+    .activeOffsetY([-10, 10])
+    .failOffsetX([-16, 16])
+    .onStart(() => {
+      dragFrom.value = progress.value;
+    })
+    .onUpdate((e) => {
+      progress.value = Math.min(1, Math.max(0, dragFrom.value + e.translationY / SPAN));
+    })
     .onEnd((e) => {
-      if (e.translationY > 20) runOnJS(setMonthMode)(true);
-      else if (e.translationY < -20) runOnJS(setMonthMode)(false);
+      const open = e.velocityY > FLICK ? true : e.velocityY < -FLICK ? false : progress.value > 0.5;
+      progress.value = withTiming(open ? 1 : 0, { duration: 200 });
+      runOnJS(setMonthMode)(open);
     });
+
+  const swipe = Gesture.Pan()
+    .activeOffsetX([-14, 14])
+    .failOffsetY([-12, 12])
+    .onUpdate((e) => {
+      slide.value = e.translationX;
+    })
+    .onEnd((e) => {
+      // Finger moving left brings the next page in from the right.
+      const dir =
+        e.translationX < -PAGE_DISTANCE || e.velocityX < -FLICK
+          ? 1
+          : e.translationX > PAGE_DISTANCE || e.velocityX > FLICK
+            ? -1
+            : 0;
+      if (!dir) {
+        slide.value = withTiming(0, { duration: 160 });
+        return;
+      }
+      slide.value = withTiming(-dir * shift, { duration: 120 }, (done) => {
+        if (done) runOnJS(turn)(dir);
+      });
+    });
+
+  const gesture = Gesture.Race(drag, swipe);
 
   /* -------- data ----------------------------------------------------- */
 
@@ -215,37 +305,37 @@ export default function Calendar() {
           : `${monthShort(a)} – ${monthShort(b)} ${b.getFullYear()}`;
       })();
 
-  const step = (n: number) => setSelected((d) => addDays(d, monthMode ? n * 28 : n * 7));
-
   return (
     <Screen>
-      <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
-        <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={[text.pageTitle, styles.ink]}>{heading}</Text>
-            <Text style={styles.weekSummary}>
-              {monthMode
-                ? t('calendar.dragCollapse')
-                : `${weekTotal} session${weekTotal === 1 ? '' : 's'} this week`}
-            </Text>
+      {/* The whole header takes the gestures, title included: a thumb that
+          lands on the month name should still be able to swipe the week. */}
+      <GestureDetector gesture={gesture}>
+        <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
+          <View style={styles.headerRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={[text.pageTitle, styles.ink]}>{heading}</Text>
+              <Text style={styles.weekSummary}>
+                {monthMode
+                  ? t('calendar.dragCollapse')
+                  : t('calendar.weekSessions', { count: weekTotal })}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <IconButton
+                name="chevronLeft"
+                iconSize={17}
+                fg={color.inkSoft}
+                onPress={() => turn(-1)}
+              />
+              <IconButton
+                name="chevronRight"
+                iconSize={17}
+                fg={color.inkSoft}
+                onPress={() => turn(1)}
+              />
+            </View>
           </View>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <IconButton
-              name="chevronLeft"
-              iconSize={17}
-              fg={color.inkSoft}
-              onPress={() => step(-1)}
-            />
-            <IconButton
-              name="chevronRight"
-              iconSize={17}
-              fg={color.inkSoft}
-              onPress={() => step(1)}
-            />
-          </View>
-        </View>
 
-        <GestureDetector gesture={pan}>
           <View>
             <View style={styles.dowRow}>
               {matrix[0].map((d) => (
@@ -313,15 +403,15 @@ export default function Calendar() {
             {/* Tap target as well as a visual affordance — a gesture nobody
                 can see is a gesture nobody uses. */}
             <Press
-              onPress={() => setMonthMode((v) => !v)}
+              onPress={() => setOpen(!monthMode)}
               style={styles.grabberHit}
               accessibilityRole="button"
-              accessibilityLabel={monthMode ? 'Collapse to week' : 'Expand to month'}>
+              accessibilityLabel={t(monthMode ? 'calendar.dragCollapse' : 'calendar.dragExpand')}>
               <View style={styles.grabber} />
             </Press>
           </View>
-        </GestureDetector>
-      </View>
+        </View>
+      </GestureDetector>
 
       <ScrollView
         contentContainerStyle={{
@@ -333,11 +423,11 @@ export default function Calendar() {
         <View style={styles.dayHead}>
           <Text style={[text.section, styles.ink]}>
             {isSameDay(selected, today)
-              ? `Today · ${dowLong(selected)} ${selected.getDate()}`
+              ? `${t('home.today')} · ${dowLong(selected)} ${selected.getDate()}`
               : `${dowLong(selected)} ${selected.getDate()}`}
           </Text>
           <Text style={styles.dayCount}>
-            {entries.length ? `${entries.length} item${entries.length === 1 ? '' : 's'}` : ''}
+            {entries.length ? t('calendar.dayItems', { count: entries.length }) : ''}
           </Text>
         </View>
 

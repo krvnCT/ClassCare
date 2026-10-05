@@ -13,6 +13,112 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
+// ---- inlined from supabase/functions/_shared/messageVars.ts ----------------
+// ClassCare — the placeholder values, server side.
+//
+// The composer offers eight placeholders and fills them in per recipient. SMS
+// is rendered on the device; email is rendered here, and until now this half
+// knew only {name}, {group} and {time}. A teacher writing "{gender} {name}
+// bugün gelmedi" got the right sentence in a text and a message with the braces
+// still in it in an email.
+//
+// This is a deliberate port of `src/lib/names.ts` and `src/lib/date.ts` rather
+// than a shared package: an Edge Function is a separate Deno deployment and
+// cannot import from the app's source tree. The two are kept honest by matching
+// tables, so if either changes both have to.
+
+type Language = 'tk' | 'ru' | 'en';
+
+const asLanguage = (value: string | null | undefined): Language =>
+  value === 'ru' || value === 'en' ? value : 'tk';
+
+/* -------------------------------------------------------------------------- */
+/* The gendered noun                                                          */
+/* -------------------------------------------------------------------------- */
+
+// Ported from src/lib/names.ts. Female endings are tested first because every
+// one of them contains a male one — `owa` ends in `wa` but starts as `ow` — and
+// testing the other way round makes every girl in the register a boy.
+const FEMALE_ENDINGS = [
+  'owa', 'ova', 'ýewa', 'yewa', 'ewa', 'eva', 'gyzy',
+  'ова', 'ева', 'ёва', 'ина', 'ская', 'кызы',
+];
+
+const MALE_ENDINGS = [
+  'ow', 'ov', 'ýew', 'yew', 'ew', 'ev', 'ogly', 'ogli', 'oglu',
+  'ов', 'ев', 'ёв', 'ин', 'ский', 'оглы',
+];
+
+function genderFromSurname(surname: string): 'male' | 'female' | null {
+  const s = surname.trim().toLowerCase().replace(/[^\p{L}]/gu, '');
+  if (s.length < 3) return null;
+  for (const e of FEMALE_ENDINGS) if (s.endsWith(e)) return 'female';
+  for (const e of MALE_ENDINGS) if (s.endsWith(e)) return 'male';
+  return null;
+}
+
+/** The stored surname, or the last word of the full name for anyone without one. */
+function surnameOf(student: { name: string; surname?: string | null }): string {
+  const stored = student.surname?.trim();
+  if (stored) return stored;
+  const parts = student.name.trim().split(/\s+/).filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 1] : '';
+}
+
+const CHILD_NOUN: Record<Language, { female: string; male: string; unknown: string }> = {
+  tk: { female: 'gyzyňyz', male: 'ogluňyz', unknown: 'çagaňyz' },
+  ru: { female: 'ваша дочь', male: 'ваш сын', unknown: 'ваш ребёнок' },
+  en: { female: 'your daughter', male: 'your son', unknown: 'your child' },
+};
+
+/**
+ * "your daughter" / "your son" / "your child".
+ *
+ * A recorded gender wins; otherwise it is read off the surname, which is what
+ * makes this work for a roster nobody filled the field in on. Where even that
+ * says nothing the neutral word is used: a message that reads generally is
+ * fine, one that calls somebody's daughter their son is not.
+ */
+function childNoun(
+  student: { name: string; surname?: string | null; gender?: string | null },
+  language: Language,
+): string {
+  const words = CHILD_NOUN[language];
+  const known = student.gender === 'male' || student.gender === 'female'
+    ? student.gender
+    : genderFromSurname(surnameOf(student));
+  if (known === 'female') return words.female;
+  if (known === 'male') return words.male;
+  return words.unknown;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Dates                                                                      */
+/* -------------------------------------------------------------------------- */
+
+// Ported from the NAMES table in src/lib/date.ts.
+const MONTHS: Record<Language, string[]> = {
+  tk: ['Ýanwar', 'Fewral', 'Mart', 'Aprel', 'Maý', 'Iýun', 'Iýul', 'Awgust', 'Sentýabr', 'Oktýabr', 'Noýabr', 'Dekabr'],
+  ru: ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'],
+  en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+};
+
+/**
+ * "15 March 2011", from a `YYYY-MM-DD` key.
+ *
+ * Matches `fullDate` on the device: the year is there because this is a date of
+ * birth, and the weekday is not because nobody needs to know a child was born
+ * on a Tuesday. Parsed by hand rather than through `new Date`, which would read
+ * the key as UTC and hand back the day before for anyone east of Greenwich.
+ */
+function fullDate(key: string | null | undefined, language: Language): string {
+  if (!key) return '';
+  const [y, m, d] = key.split('-').map(Number);
+  if (!y || !m || !d || m < 1 || m > 12) return '';
+  return `${d} ${MONTHS[language][m - 1]} ${y}`;
+}
+// ---- end of inlined messageVars.ts -------------------------------------------
+
 type Audience = 'students' | 'parents' | 'both';
 type Channel = 'sms' | 'email' | 'push';
 
@@ -42,11 +148,28 @@ type ResolvedAttachment = { filename: string; path: string };
 type Recipient = {
   studentId: string;
   kind: 'student' | 'parent';
+  /**
+   * The *student's* name, on a parent's copy as much as on their own.
+   *
+   * This used to be the parent's own name on a parent row, which meant one
+   * draft said two different things depending on the channel: the device has
+   * always put the student's name here, because "your daughter Aýgül" reads
+   * correctly and "your daughter Maýa Berdiýewa" does not. The parent's name is
+   * `{parent_name}`, which now exists.
+   */
   name: string;
   phone: string | null;
   email: string | null;
   groupName: string;
   time: string;
+  /** "your daughter" / "your son" / "your child", already in the right language. */
+  gender: string;
+  parentName: string;
+  studentPhone: string;
+  address: string;
+  birthDate: string;
+  /** Absences recorded for the course this message is about. */
+  missedClasses: number;
 };
 
 const json = (body: unknown, status = 200) =>
@@ -61,15 +184,31 @@ const cors = {
   'access-control-allow-methods': 'POST, OPTIONS',
 };
 
-/** Substitute the placeholders the composer offers. */
+/**
+ * Substitute the placeholders the composer offers — all nine of them, plus the
+ * two aliases a teacher writing in Turkmen reaches for.
+ *
+ * The same set and the same order as `renderBody` in `src/lib/messageVars.ts`,
+ * which does this for SMS. They have to agree: one draft, two channels, and a
+ * teacher who sends by both should not be sending two different messages.
+ */
 function render(template: string, r: Recipient) {
   return template
     .replaceAll('{name}', r.name)
     .replaceAll('{group}', r.groupName)
-    .replaceAll('{time}', r.time);
+    .replaceAll('{time}', r.time)
+    .replaceAll('{gender}', r.gender)
+    .replaceAll('{parent_name}', r.parentName)
+    .replaceAll('{phone}', r.studentPhone)
+    .replaceAll('{address}', r.address)
+    .replaceAll('{birthdate}', r.birthDate)
+    .replaceAll('{missed_classes}', String(r.missedClasses))
+    .replaceAll('{parent}', r.parentName)
+    .replaceAll('{jynsy}', r.gender)
+    .replaceAll('{jyns}', r.gender);
 }
 
-/** E.164-ish: Turkmen numbers are stored spaced, gateways want digits only. */
+/** E.164-ish: Uzbek numbers are stored spaced, gateways want digits only. */
 const normalizePhone = (p: string) => p.replace(/[^\d]/g, '');
 
 /** Next occurrence of a weekly slot, for `{time}`. */
@@ -369,7 +508,7 @@ function resendFailure(status: number, body: { message?: string; name?: string }
   return detail;
 }
 
-async function sendEmail(opts: {
+type EmailOptions = {
   to: string;
   subject: string;
   text: string;
@@ -379,7 +518,49 @@ async function sendEmail(opts: {
   unsubscribeTo?: string;
   /** Signed URLs Resend fetches for itself — see `Payload.attachments`. */
   attachments?: ResolvedAttachment[];
-}) {
+};
+
+/**
+ * Resend allows two requests a second per account unless asked for more.
+ *
+ * Every email used to be sent at once, in one `Promise.all`. For a class of
+ * thirty that was mostly fine; for four hundred students picked by a filter it
+ * was eight hundred requests in the same instant, and nearly all of them came
+ * back 429. Requests are spaced instead, and mail without files goes a hundred
+ * to a request through the batch endpoint — see `sendEmailBatch`.
+ */
+const RESEND_SPACING_MS = 550;
+let lastResendCall = 0;
+
+async function paceResend() {
+  const wait = lastResendCall + RESEND_SPACING_MS - Date.now();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  lastResendCall = Date.now();
+}
+
+/** POST to Resend, spaced, retrying once on a rate limit. */
+async function resendPost(path: string, payload: unknown) {
+  for (let attempt = 0; ; attempt += 1) {
+    await paceResend();
+    const res = await fetch(`https://api.resend.com${path}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${Deno.env.get('RESEND_API_KEY')}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 429 && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      continue;
+    }
+    return { res, body };
+  }
+}
+
+/** One email as Resend wants it. Shared by the single and the batch send. */
+function emailPayload(opts: EmailOptions) {
   // Deliberately no fallback to `onboarding@resend.dev`. That sandbox sender
   // exists to let you prove your API key works, and Resend refuses every
   // recipient except the account owner's own address — so falling back to it
@@ -402,33 +583,62 @@ async function sendEmail(opts: {
     Deno.env.get('RESEND_REPLY_TO') ||
     from.replace(/^.*<|>$/g, '');
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
+  return {
+    from,
+    to: opts.to,
+    subject: opts.subject,
+    text: opts.text,
+    html: opts.html,
+    ...(replyTo ? { reply_to: replyTo } : {}),
+    ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
     headers: {
-      authorization: `Bearer ${Deno.env.get('RESEND_API_KEY')}`,
-      'content-type': 'application/json',
+      // Required of bulk senders by Gmail and Yahoo. `mailto:` alone is a
+      // valid List-Unsubscribe; one-click (RFC 8058) additionally needs an
+      // HTTPS endpoint, which is worth adding once volume justifies it.
+      'List-Unsubscribe': `<mailto:${unsubscribeMailbox}?subject=unsubscribe>`,
+      // Transactional class: tells filters this is not marketing.
+      'X-Entity-Ref-ID': crypto.randomUUID(),
     },
-    body: JSON.stringify({
-      from,
-      to: opts.to,
-      subject: opts.subject,
-      text: opts.text,
-      html: opts.html,
-      ...(replyTo ? { reply_to: replyTo } : {}),
-      ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
-      headers: {
-        // Required of bulk senders by Gmail and Yahoo. `mailto:` alone is a
-        // valid List-Unsubscribe; one-click (RFC 8058) additionally needs an
-        // HTTPS endpoint, which is worth adding once volume justifies it.
-        'List-Unsubscribe': `<mailto:${unsubscribeMailbox}?subject=unsubscribe>`,
-        // Transactional class: tells filters this is not marketing.
-        'X-Entity-Ref-ID': crypto.randomUUID(),
-      },
-    }),
-  });
-  const body = await res.json().catch(() => ({}));
+  };
+}
+
+async function sendEmail(opts: EmailOptions) {
+  const { res, body } = await resendPost('/emails', emailPayload(opts));
   if (!res.ok) throw new Error(resendFailure(res.status, body));
   return String(body?.id ?? '');
+}
+
+/**
+ * Up to a hundred emails in one request, ids back in the same order.
+ *
+ * Resend's batch endpoint takes everything but attachments, so mail with files
+ * goes one at a time through `sendEmail`. A batch is refused whole when any one
+ * address in it is bad; the caller then sends that batch's emails singly, so
+ * the bad address fails on its own and the rest still go.
+ */
+async function sendEmailBatch(list: EmailOptions[]): Promise<string[]> {
+  const { res, body } = await resendPost('/emails/batch', list.map(emailPayload));
+  if (!res.ok) throw new Error(resendFailure(res.status, body));
+  const data = (body?.data ?? []) as { id?: string }[];
+  return list.map((_, i) => String(data[i]?.id ?? ''));
+}
+
+/** Ids per `in.(…)` filter — the list travels in the URL. */
+const ID_CHUNK = 100;
+
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** Run `task` over `items`, at most `limit` at a time. */
+async function eachLimited<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await task(items[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -467,11 +677,14 @@ Deno.serve(async (req) => {
   // and gives the parent someone to reply to.
   const { data: teacherRow } = await db
     .from('teachers')
-    .select('name, email')
+    .select('name, email, language')
     .eq('id', teacherId)
     .single();
   const teacherName = (teacherRow?.name ?? '').trim() || 'Your teacher';
   const teacherEmail = teacherRow?.email ?? undefined;
+  // The gendered noun and the month names are words, so they are written in
+  // whichever language the teacher is composing in.
+  const language = asLanguage(teacherRow?.language);
 
   let payload: Payload;
   try {
@@ -537,18 +750,52 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Resolve the target groups. An announcement means "every active group".
-  const groupQuery = db
-    .from('groups')
-    .select('id, name, group_slots(weekday, starts_at)')
-    .eq('teacher_id', teacherId)
-    .is('archived_at', null);
+  /*
+    Who it goes to.
 
-  const { data: groups, error: groupError } = announcement
-    ? await groupQuery
-    : await groupQuery.in('id', payload.groupIds ?? []);
-  if (groupError) return json({ error: groupError.message }, 400);
-  if (!groups?.length) {
+    Normally the students of the chosen groups — an announcement meaning every
+    active group — narrowed by `studentIds` when the caller passes them.
+
+    When the caller names the students outright, those students are the list.
+    That is how the students tab sends to whoever its filters left on screen:
+    four hundred people across fifteen classes, some in a finished term, some
+    in no class at all. Reaching them through their groups dropped everyone in
+    a class that was not ticked, in an archived one, or in none. The groups
+    sent alongside are then only the context `{group}` and `{time}` are filled
+    from, archived ones included, and may be empty.
+  */
+  const explicit = !announcement && payload.studentIds?.length
+    ? [...new Set(payload.studentIds)]
+    : null;
+
+  type GroupRow = {
+    id: string;
+    name: string;
+    group_slots: { weekday: number; starts_at: string }[];
+  };
+  const groups: GroupRow[] = [];
+  if (announcement) {
+    const { data, error } = await db
+      .from('groups')
+      .select('id, name, group_slots(weekday, starts_at)')
+      .eq('teacher_id', teacherId)
+      .is('archived_at', null);
+    if (error) return json({ error: error.message }, 400);
+    groups.push(...((data ?? []) as GroupRow[]));
+  } else {
+    for (const ids of chunked([...new Set(payload.groupIds ?? [])], ID_CHUNK)) {
+      let q = db
+        .from('groups')
+        .select('id, name, group_slots(weekday, starts_at)')
+        .eq('teacher_id', teacherId)
+        .in('id', ids);
+      if (!explicit) q = q.is('archived_at', null);
+      const { data, error } = await q;
+      if (error) return json({ error: error.message }, 400);
+      groups.push(...((data ?? []) as GroupRow[]));
+    }
+  }
+  if (!groups.length && !explicit) {
     // Distinguishing these matters, because the second one is not something the
     // teacher did wrong. Writes are mirrored to Supabase in the background and
     // a failure there is currently only logged (see `enqueue` in data/sync.ts),
@@ -570,33 +817,94 @@ Deno.serve(async (req) => {
 
   const groupIds = groups.map((g) => g.id);
 
-  const { data: links, error: linkError } = await db
-    .from('student_groups')
-    .select('student_id, group_id')
-    .eq('teacher_id', teacherId)
-    .in('group_id', groupIds);
-  if (linkError) return json({ error: linkError.message }, 400);
+  // In chunks: each `in.(…)` list is part of the URL, and a filter of a few
+  // hundred ids is past what the gateway will read.
+  const links: { student_id: string; group_id: string }[] = [];
+  for (const ids of chunked(groupIds, ID_CHUNK)) {
+    const { data, error } = await db
+      .from('student_groups')
+      .select('student_id, group_id')
+      .eq('teacher_id', teacherId)
+      .in('group_id', ids);
+    if (error) return json({ error: error.message }, 400);
+    links.push(...(data ?? []));
+  }
 
-  let studentIds = [...new Set((links ?? []).map((l) => l.student_id))];
-  if (payload.studentIds?.length) {
+  let studentIds = explicit ?? [...new Set(links.map((l) => l.student_id))];
+  if (!explicit && payload.studentIds?.length) {
     const allow = new Set(payload.studentIds);
     studentIds = studentIds.filter((id) => allow.has(id));
   }
   if (!studentIds.length) return json({ error: 'No recipients' }, 400);
 
-  const { data: students, error: studentError } = await db
-    .from('students')
-    .select('id, name, phone, email, parent_name, parent_phone, parent_email')
-    .eq('teacher_id', teacherId)
-    .in('id', studentIds)
-    .is('archived_at', null);
-  if (studentError) return json({ error: studentError.message }, 400);
+  type StudentRow = {
+    id: string;
+    name: string;
+    surname: string | null;
+    gender: string | null;
+    phone: string;
+    email: string | null;
+    address: string | null;
+    birth_date: string | null;
+    parent_name: string | null;
+    parent_phone: string | null;
+    parent_email: string | null;
+  };
+  const students: StudentRow[] = [];
+  for (const ids of chunked(studentIds, ID_CHUNK)) {
+    const { data, error } = await db
+      .from('students')
+      .select(
+        'id, name, surname, gender, phone, email, address, birth_date, ' +
+          'parent_name, parent_phone, parent_email',
+      )
+      .eq('teacher_id', teacherId)
+      .in('id', ids)
+      .is('archived_at', null);
+    if (error) return json({ error: error.message }, 400);
+    students.push(...((data ?? []) as unknown as StudentRow[]));
+  }
+  if (!students.length) return json({ error: 'No recipients' }, 400);
+  // Only the students actually found — archived ones and foreign ids are gone.
+  studentIds = students.map((s) => s.id);
 
   const now = new Date();
   const groupById = new Map(groups.map((g) => [g.id, g]));
   const groupOfStudent = new Map<string, string>();
   for (const l of links ?? [])
     if (!groupOfStudent.has(l.student_id)) groupOfStudent.set(l.student_id, l.group_id);
+
+  /*
+    Absences for `{missed_classes}`, counted against the same course
+    `{group}` and `{time}` name — not every group the student is in.
+
+    One query for the whole batch rather than one per student: a class of
+    thirty is thirty avoidable round trips otherwise. Failure here is not
+    failure to send — a class reminder does not need this number to be right,
+    and a teacher waiting on a send should not lose the whole thing because a
+    supplementary count could not be read. Missing counts default to zero,
+    the same as the device does for a student who has no attendance rows yet.
+  */
+  const missedByStudent = new Map<string, number>();
+  // Fifty students a query: two id lists share this URL, and a response stops
+  // at a thousand rows, which fifty students' absences stay well under.
+  for (const ids of groupIds.length ? chunked(studentIds, 50) : []) {
+    const { data: absenceRows, error: absenceError } = await db
+      .from('attendance')
+      .select('student_id, group_id')
+      .eq('teacher_id', teacherId)
+      .eq('status', 'absent')
+      .in('student_id', ids)
+      .in('group_id', groupIds);
+    if (absenceError) {
+      console.error('attendance lookup for {missed_classes} failed:', absenceError.message);
+      break;
+    }
+    for (const row of absenceRows ?? []) {
+      if (row.group_id !== groupOfStudent.get(row.student_id)) continue;
+      missedByStudent.set(row.student_id, (missedByStudent.get(row.student_id) ?? 0) + 1);
+    }
+  }
 
   // Build the recipient list. "Both" produces two rows for the same student —
   // one to them, one to their guardian — each rendered with its own name.
@@ -606,15 +914,27 @@ Deno.serve(async (req) => {
     const groupName = g?.name ?? '';
     const time = nextSlotTime(g?.group_slots ?? [], now);
 
+    // Everything that is about the student rather than about who is being
+    // written to, so both rows below carry the same values.
+    const about = {
+      name: s.name,
+      groupName,
+      time,
+      gender: childNoun(s, language),
+      parentName: (s.parent_name ?? '').trim(),
+      studentPhone: (s.phone ?? '').trim(),
+      address: (s.address ?? '').trim(),
+      birthDate: fullDate(s.birth_date, language),
+      missedClasses: missedByStudent.get(s.id) ?? 0,
+    };
+
     if (audience === 'students' || audience === 'both') {
       recipients.push({
         studentId: s.id,
         kind: 'student',
-        name: s.name,
         phone: s.phone,
         email: s.email,
-        groupName,
-        time,
+        ...about,
       });
     }
     // A guardian counts as reachable if we hold any way to reach them. Keying
@@ -627,12 +947,9 @@ Deno.serve(async (req) => {
       recipients.push({
         studentId: s.id,
         kind: 'parent',
-        // Parents get addressed by their own name where we have one.
-        name: s.parent_name ?? s.name,
         phone: s.parent_phone,
         email: s.parent_email,
-        groupName,
-        time,
+        ...about,
       });
     }
   }
@@ -705,7 +1022,8 @@ Deno.serve(async (req) => {
     if (attachError) console.warn('could not record attachments:', attachError.message);
   }
 
-  if (!announcement) {
+  // A send to students picked by a filter may name no group at all.
+  if (!announcement && groupIds.length) {
     await db
       .from('message_groups')
       .insert(groupIds.map((group_id) => ({ message_id: message.id, group_id })));
@@ -724,11 +1042,26 @@ Deno.serve(async (req) => {
     state: 'queued' as const,
   }));
 
-  const { data: deliveries, error: deliveryError } = await db
-    .from('message_deliveries')
-    .insert(queued)
-    .select();
-  if (deliveryError) return json({ error: deliveryError.message }, 400);
+  // In chunks, so a send to hundreds is several inserts rather than one body
+  // the size of the whole class list — and each answer stays under the row
+  // limit a response is cut off at.
+  type DeliveryRow = {
+    id: string;
+    student_id: string;
+    recipient: string;
+    channel: Channel;
+    destination: string;
+    rendered: string;
+  };
+  const deliveries: DeliveryRow[] = [];
+  for (const chunk of chunked(queued, 500)) {
+    const { data, error: deliveryError } = await db
+      .from('message_deliveries')
+      .insert(chunk)
+      .select('id, student_id, recipient, channel, destination, rendered');
+    if (deliveryError) return json({ error: deliveryError.message }, 400);
+    deliveries.push(...((data ?? []) as DeliveryRow[]));
+  }
 
   // Dispatch. Failures are recorded per row — one bad number must not sink the
   // whole send. They are also counted, because a delivery that failed silently
@@ -737,53 +1070,98 @@ Deno.serve(async (req) => {
   let failed = 0;
   const errors = new Set<string>();
 
-  await Promise.all(
-    (deliveries ?? []).map(async (d) => {
-      try {
-        let providerId = '';
-        if (d.channel === 'sms') providerId = await sendSms(d.destination, d.rendered);
-        else if (d.channel === 'email') {
-          const r = byStudent.get(`${d.student_id}:${d.recipient}`);
-          const { subject, text, html } = renderEmail({
-            body: d.rendered,
-            teacherName,
-            groupName: r?.groupName ?? 'your class',
-            isAnnouncement: !!message.announcement,
-            recipientKind: d.recipient as 'student' | 'parent',
-          });
-          providerId = await sendEmail({
-            to: d.destination,
-            subject,
-            text,
-            html,
-            // The tokenised address when inbound is configured, otherwise
-            // straight to the teacher exactly as before.
-            replyTo: replyAddressFor(d.id) ?? teacherEmail,
-            unsubscribeTo: teacherEmail,
-            attachments,
-          });
-        } else return; // Push is batched below.
+  const markSent = async (d: DeliveryRow, providerId: string) => {
+    await db
+      .from('message_deliveries')
+      .update({ state: 'sent', provider_id: providerId, updated_at: new Date().toISOString() })
+      .eq('id', d.id);
+    sent += 1;
+  };
+  const markFailed = async (d: DeliveryRow, e: unknown) => {
+    const reason = e instanceof Error ? e.message : String(e);
+    failed += 1;
+    errors.add(reason);
+    await db
+      .from('message_deliveries')
+      .update({ state: 'failed', error: reason, updated_at: new Date().toISOString() })
+      .eq('id', d.id);
+  };
 
-        await db
-          .from('message_deliveries')
-          .update({ state: 'sent', provider_id: providerId, updated_at: new Date().toISOString() })
-          .eq('id', d.id);
-        sent += 1;
+  const emailFor = (d: DeliveryRow): EmailOptions => {
+    const r = byStudent.get(`${d.student_id}:${d.recipient}`);
+    const { subject, text, html } = renderEmail({
+      body: d.rendered,
+      teacherName,
+      groupName: r?.groupName ?? 'your class',
+      isAnnouncement: !!message.announcement,
+      recipientKind: d.recipient as 'student' | 'parent',
+    });
+    return {
+      to: d.destination,
+      subject,
+      text,
+      html,
+      // The tokenised address when inbound is configured, otherwise
+      // straight to the teacher exactly as before.
+      replyTo: replyAddressFor(d.id) ?? teacherEmail,
+      unsubscribeTo: teacherEmail,
+      attachments,
+    };
+  };
+
+  const sms = deliveries.filter((d) => d.channel === 'sms');
+  const email = deliveries.filter((d) => d.channel === 'email');
+
+  // Ten at a time: the gateway call and the row update for each, without
+  // opening hundreds of connections at once.
+  await eachLimited(sms, 10, async (d) => {
+    try {
+      await markSent(d, await sendSms(d.destination, d.rendered));
+    } catch (e) {
+      await markFailed(d, e);
+    }
+  });
+
+  /*
+    Email a hundred to a request where it can be, one at a time where it must.
+
+    The batch endpoint takes no attachments, so a message with files is sent
+    singly — spaced to Resend's rate either way. A batch Resend refuses (one
+    malformed address fails all hundred) is retried singly too, so only that
+    address fails.
+  */
+  const sendSingly = async (list: DeliveryRow[]) => {
+    for (const d of list) {
+      try {
+        await markSent(d, await sendEmail(emailFor(d)));
       } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        failed += 1;
-        errors.add(reason);
-        await db
-          .from('message_deliveries')
-          .update({
-            state: 'failed',
-            error: reason,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', d.id);
+        await markFailed(d, e);
       }
-    }),
-  );
+    }
+  };
+
+  if (attachments.length) {
+    await sendSingly(email);
+  } else {
+    for (const chunk of chunked(email, 100)) {
+      let ids: string[] | null = null;
+      try {
+        ids = await sendEmailBatch(chunk.map(emailFor));
+      } catch (e) {
+        console.warn('[classcare] batch refused, sending singly:', e);
+      }
+      if (ids) {
+        const providerIds = ids;
+        await eachLimited(
+          chunk.map((d, i) => ({ d, id: providerIds[i] })),
+          10,
+          ({ d, id }) => markSent(d, id),
+        );
+      } else {
+        await sendSingly(chunk);
+      }
+    }
+  }
 
   // Push goes to devices, which ClassCare only has for the teacher today —
   // a student-facing app is explicitly out of scope, so this is a no-op until

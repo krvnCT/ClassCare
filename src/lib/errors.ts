@@ -69,6 +69,24 @@ export function isOfflineError(e: unknown): boolean {
   );
 }
 
+/**
+ * Did the server answer, but with "not now" rather than "no"?
+ *
+ * Overloaded shared hosting (503, and Hostinger's own 508 "resource limit"),
+ * an upstream restarting (502, 504, Cloudflare's 52x), a rate limit (429), a
+ * request that took too long (408). None of these says anything is wrong with
+ * the write; the same request a minute later goes through. Kept apart from
+ * `isOfflineError` because the sync queue gives these a bounded number of
+ * retries, where a dead connection is waited out indefinitely.
+ */
+export function isRetryableServerError(e: unknown): boolean {
+  const status = statusOf(e);
+  if (status === 408 || status === 425 || status === 429) return true;
+  if (status !== null && status >= 500) return true;
+  const text = textOf(e).toLowerCase();
+  return text.includes('resource limit') || text.includes('too many requests');
+}
+
 const codeOf = (e: unknown): string =>
   e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : '';
 

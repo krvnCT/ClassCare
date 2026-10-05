@@ -59,7 +59,7 @@ export function historicMark(studentId: string, key: string): AttendanceStatus {
   return 'present';
 }
 
-type NewStudent = {
+export type NewStudent = {
   /**
    * Optional, and supplied by the form so a photo can be stored against the
    * student before they exist. Minting it here instead would mean the picture
@@ -205,6 +205,15 @@ type State = {
   addStudent: (s: NewStudent) => string;
   updateStudent: (id: string, patch: Partial<Student>) => void;
   removeStudent: (id: string) => void;
+  /**
+   * Many students in one change: what a spreadsheet import does. Returns the
+   * ids of the students added, in order. See the implementation for why this
+   * is not `addStudent` in a loop.
+   */
+  importStudents: (changes: {
+    adds: NewStudent[];
+    updates: { id: string; patch: Partial<Student> }[];
+  }) => string[];
   /** Set a group's roster to exactly these students, adding and removing. */
   setGroupRoster: (groupId: string, studentIds: string[]) => void;
 
@@ -335,6 +344,8 @@ export type StoreMirror = {
   deleteGroup: (id: string) => void;
   createStudent: (student: Student) => void;
   updateStudent: (id: string, patch: Partial<Student>) => void;
+  /** An import's changes, queued as batches. Memberships only ever added. */
+  updateStudents: (patches: { id: string; patch: Partial<Student> }[]) => void;
   archiveStudent: (id: string) => void;
   uploadStudentPhoto: (id: string) => void;
   saveAttendance: (key: string, marks: AttendanceRecord) => void;
@@ -584,6 +595,41 @@ export const useStore = create<State>()((set, get) => ({
   removeStudent: (id) => {
     set((s) => ({ students: s.students.filter((x) => x.id !== id) }));
     mirror.archiveStudent?.(id);
+  },
+
+  /*
+    One state change for the whole file, not one per row.
+
+    `addStudent` in a loop rebuilt the student array once per row — four
+    hundred copies of a list four hundred long — and woke every subscriber
+    each time: the persistence layer re-diffing the store, every mounted screen
+    re-selecting. One `set` is one of each.
+
+    The server half is queued after the local half and in file order, so the
+    queue's batching sees an unbroken run of creates — see `foldIntoBatch`.
+  */
+  importStudents: ({ adds, updates }) => {
+    const base = get().students.length;
+    const created: Student[] = adds.map((input, i) => ({
+      ...input,
+      id: input.id ?? uid(),
+      accent: input.accent ?? accentNames[(base + i) % accentNames.length],
+    }));
+    const patchOf = new Map(updates.map((u) => [u.id, u.patch]));
+
+    set((s) => ({
+      students: [
+        ...s.students.map((x) => {
+          const patch = patchOf.get(x.id);
+          return patch ? { ...x, ...patch } : x;
+        }),
+        ...created,
+      ],
+    }));
+
+    if (updates.length) mirror.updateStudents?.(updates);
+    for (const student of created) mirror.createStudent?.(student);
+    return created.map((s) => s.id);
   },
 
   /**
