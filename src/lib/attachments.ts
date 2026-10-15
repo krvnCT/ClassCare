@@ -12,6 +12,7 @@ import * as Crypto from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 
 import Beam from '../../modules/beam/src/BeamModule';
+import { requireUserId } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 
 /** Matches `file_size_limit` on the bucket in migration 0010. */
@@ -209,12 +210,12 @@ export async function uploadAttachments(
   picked: PickedAttachment[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<UploadedAttachment[]> {
-  // `getSession`, not `getUser`: the latter posts to the auth server to have
-  // the token checked, so a slow connection here reported the teacher as
-  // signed out on the way to an upload that would have worked.
-  const { data: auth } = await supabase.auth.getSession();
-  const teacherId = auth.session?.user?.id;
-  if (!teacherId) throw new Error('Not signed in');
+  // The stored session, not `getUser`: the latter posts to the auth server to
+  // have the token checked, so a slow connection here reported the teacher as
+  // signed out on the way to an upload that would have worked. And not a bare
+  // `getSession` either — see `requireUserId` for what that said when the
+  // phone simply had no signal.
+  const teacherId = await requireUserId();
 
   // `expo-crypto`, not the global `crypto`. Hermes has no Web Crypto, so
   // `crypto.randomUUID()` is a ReferenceError on device — and this line only

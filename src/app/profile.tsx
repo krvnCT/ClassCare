@@ -18,7 +18,7 @@ import { Icon } from '@/components/Icon';
 import { Screen, TopBar } from '@/components/layout';
 import { ActionRow, InfoRow } from '@/components/SettingsRows';
 import { Button, Card, Divider, Overline, Press, StatTile } from '@/components/ui';
-import { deleteAccountData, updateTeacher } from '@/data/api';
+import { deleteAccountData } from '@/data/api';
 import { useGroups, useStore, useStudents } from '@/data/store';
 import { wipeLocal } from '@/data/persistence';
 import { clearQueue, flushWrites } from '@/data/sync';
@@ -76,15 +76,18 @@ export default function Profile() {
     const next = draftName.trim();
     if (next.length < 2) return;
 
-    useStore.setState({ teacherName: next });
     setEditing(false);
 
-    if (!live) return;
-    try {
-      await updateTeacher({ name: next, timezone });
-    } catch (e) {
-      showError(e, t('profile.couldNotSave'));
-    }
+    /*
+      Local first, like every other edit.
+
+      This awaited the server directly, so on a connection that was down the
+      name was changed on the screen, the request failed, and the teacher was
+      told it "could not be saved" — and then the next pull put the server's old
+      name back. Now it is saved on the phone and queued; the sync banner is
+      what says when the server has not caught up.
+    */
+    useStore.getState().setTeacherName(next, timezone);
   };
 
   const confirmSignOut = async () => {

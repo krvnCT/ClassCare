@@ -34,6 +34,7 @@ import type {
 import { AppState } from 'react-native';
 
 import { translateNow } from '@/i18n/useT';
+import { requireUserId } from '@/lib/session';
 import { documentKey } from '@/lib/studentDocs';
 import { supabase } from '@/lib/supabase';
 
@@ -236,13 +237,13 @@ const counted = (count: boolean) => (count ? ({ count: 'exact' } as const) : und
  *
  * `getSession()` reads the stored session and only touches the network when
  * the access token has actually aged out, which is the question being asked.
+ *
+ * And when it *has* aged out with no signal, `getSession()` still answers
+ * `null` — which this used to read as "not signed in" and report as an expired
+ * session, dropping the write. `requireUserId` tells that case apart and throws
+ * the network error, so the change stays queued as "saved on this phone".
  */
-const requireUser = async () => {
-  const { data } = await supabase.auth.getSession();
-  const id = data.session?.user?.id;
-  if (!id) throw new Error('Not signed in');
-  return id;
-};
+const requireUser = requireUserId;
 
 /* -------------------------------------------------------------------------- */
 /* Reads                                                                      */

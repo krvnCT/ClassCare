@@ -146,6 +146,7 @@ export type Op =
   | { kind: 'event.update'; id: string; patch: Partial<Omit<CalendarEvent, 'id'>> }
   | { kind: 'event.delete'; id: string }
   | { kind: 'teacher.language'; language: Language }
+  | { kind: 'teacher.profile'; patch: { name?: string; timezone?: string } }
   | { kind: 'teacher.gradeTemplate'; template: string | null }
   | { kind: 'teacher.gradeTemplateFail'; template: string | null }
   /** The teacher's rewrites of the built-in templates, as one whole map. */
@@ -269,6 +270,8 @@ function perform(op: Op): Promise<unknown> {
       return api.deleteEvent(op.id);
     case 'teacher.language':
       return api.updateTeacher({ language: op.language });
+    case 'teacher.profile':
+      return api.updateTeacher(op.patch);
     case 'teacher.gradeTemplate':
       return api.updateTeacher({ gradeTemplate: op.template });
     case 'teacher.gradeTemplateFail':
@@ -306,6 +309,8 @@ function labelOf(op: Op): string {
                 ? 'sync.item.reply'
                 : op.kind === 'teacher.language'
                   ? 'sync.item.language'
+                  : op.kind === 'teacher.profile'
+                    ? 'sync.item.profile'
                   : op.kind.startsWith('teacher.gradeTemplate')
                     ? 'sync.item.template'
                     : 'sync.item.message';
@@ -548,6 +553,12 @@ function setRejected(value: boolean) {
   });
 }
 
+/**
+ * The last drain stopped because the session is gone, not because of the
+ * connection. Lets the Sync button say "sign in" instead of "no internet".
+ */
+let awaitingSignIn = false;
+
 async function drain(): Promise<void> {
   if (draining) return;
   draining = true;
@@ -563,6 +574,9 @@ async function drain(): Promise<void> {
   */
   let failures = 0;
   let firstFailure: { what: string; reason: string } | null = null;
+  /** The account is signed out: what is queued is kept and waits for a sign-in. */
+  let signInNeeded = false;
+  awaitingSignIn = false;
 
   useSyncStatus.getState().report({ syncing: true });
   try {
@@ -581,6 +595,22 @@ async function drain(): Promise<void> {
           useSyncStatus.getState().report({ offline: true });
           scheduleRetry(job.attempts);
           return;
+        }
+
+        /*
+          The session is genuinely gone.
+
+          A refresh token the server refused, or a 401 — never a phone with no
+          signal, which `requireUserId` reports as unreachable and is waited out
+          above. It says nothing against the write: sign in again and it goes
+          through. It used to be dropped here and reported as "could not be
+          saved", which lost the change on the server and told the teacher it
+          was lost, when it was sitting safely on this phone. It stays at the
+          head of the queue and the banner says what is needed.
+        */
+        if (describeError(e).kind === 'auth') {
+          signInNeeded = true;
+          break;
         }
 
         /*
@@ -637,6 +667,12 @@ async function drain(): Promise<void> {
           failures === 1
             ? translateNow('sync.couldNotSave', firstFailure!)
             : translateNow('sync.couldNotSaveMany', { ...firstFailure!, count: failures - 1 }),
+      });
+    } else if (signInNeeded) {
+      awaitingSignIn = true;
+      useSyncStatus.getState().report({
+        offline: false,
+        failure: translateNow('sync.signInToSend', { count: queue.length }),
       });
     } else if (!queue.length) {
       /*
@@ -713,6 +749,12 @@ function mergePatch(existing: Op, incoming: Op): Op | null {
       const next = incoming as typeof existing;
       if (existing.id !== next.id) return null;
       return { ...existing, patch: { ...existing.patch, ...next.patch } } as Op;
+    }
+    // One teacher, so no id to compare: a name change and a timezone change
+    // queued apart are still one row, and the later value of a field wins.
+    case 'teacher.profile': {
+      const next = incoming as typeof existing;
+      return { ...existing, patch: { ...existing.patch, ...next.patch } };
     }
     default:
       return null;
@@ -871,7 +913,7 @@ export async function retryNow() {
  * a screen that goes blank. The outcome comes back as a word the caller can put
  * on the screen.
  */
-export async function syncNow(): Promise<'done' | 'offline' | 'failed'> {
+export async function syncNow(): Promise<'done' | 'offline' | 'failed' | 'signIn'> {
   if (!hasSupabase) return 'done';
 
   useSyncStatus.getState().report({ syncing: true });
@@ -879,7 +921,9 @@ export async function syncNow(): Promise<'done' | 'offline' | 'failed'> {
     if (!(await isReachable())) return 'offline';
 
     const drained = await flushWrites();
-    if (!drained) return 'offline';
+    // Saying which: "no internet" for a signed-out session sends the teacher
+    // looking for signal they already have.
+    if (!drained) return awaitingSignIn ? 'signIn' : 'offline';
 
     await hydrate();
     useSyncStatus.getState().report({ lastSyncedAt: Date.now(), offline: false });
@@ -1217,6 +1261,9 @@ export const remote: StoreMirror = {
   logMessage: (entry) => enqueue({ kind: 'message.log', entry }),
 
   setLanguage: (language: Language) => enqueue({ kind: 'teacher.language', language }),
+
+  setProfile: (patch: { name?: string; timezone?: string }) =>
+    enqueue({ kind: 'teacher.profile', patch }),
 
   setGradeTemplate: (template: string | null) =>
     enqueue({ kind: 'teacher.gradeTemplate', template }),

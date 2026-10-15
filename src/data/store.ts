@@ -277,6 +277,12 @@ type State = {
   deleteTerm: (term: string) => void;
 
   setLanguage: (language: Language) => void;
+  /**
+   * Change the teacher's name. Saved on the phone at once and queued for the
+   * server like every other edit, so it survives a dead connection instead of
+   * being overwritten by the server's old copy at the next pull.
+   */
+  setTeacherName: (name: string, timezone?: string) => void;
   /** Null puts the teacher back on the app's translated default. */
   setGradeTemplate: (template: string | null) => void;
   setGradeTemplateFail: (template: string | null) => void;
@@ -358,6 +364,7 @@ export type StoreMirror = {
   }) => void;
   logMessage: (entry: SentMessageLog) => void;
   setLanguage: (language: Language) => void;
+  setProfile: (patch: { name?: string; timezone?: string }) => void;
   setGradeTemplate: (template: string | null) => void;
   setGradeTemplateFail: (template: string | null) => void;
   setTemplateOverrides: (overrides: Record<string, { title: string; body: string }>) => void;
@@ -761,6 +768,11 @@ export const useStore = create<State>()((set, get) => ({
     //
     // `hydrate` pushes the pending choice up at sign-in, so nothing is lost.
     if (get().signedIn) mirror.setLanguage?.(language);
+  },
+
+  setTeacherName: (name, timezone) => {
+    set({ teacherName: name });
+    if (get().signedIn) mirror.setProfile?.({ name, ...(timezone ? { timezone } : {}) });
   },
 
   setGradeTemplate: (template) => {

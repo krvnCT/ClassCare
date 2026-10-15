@@ -90,6 +90,12 @@ export function SyncPill({ style }: { style?: object }) {
       const outcome = await syncNow();
       if (outcome === 'offline') {
         await showAlert(t('sync.stillOfflineTitle'), t('sync.stillOfflineBody'));
+      } else if (outcome === 'signIn') {
+        await showAlert(
+          t('error.authTitle'),
+          t('sync.signInToSend', { count: useSyncStatus.getState().pending }),
+          'danger',
+        );
       } else if (outcome === 'failed') {
         await showAlert(t('sync.failedTitle'), t('sync.failedBody'), 'danger');
       }

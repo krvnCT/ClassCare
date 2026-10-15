@@ -23,6 +23,7 @@ import { create } from 'zustand';
 
 import { moveIfPresent, photosDirectory } from '@/lib/appFolder';
 import { translateNow } from '@/i18n/useT';
+import { requireUserId } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 
 /*
@@ -372,9 +373,7 @@ export const photoStoragePath = (teacherId: string, studentId: string) =>
  * face in storage forever.
  */
 export async function uploadPhoto(studentId: string): Promise<string> {
-  const { data: auth } = await supabase.auth.getSession();
-  const teacherId = auth.session?.user?.id;
-  if (!teacherId) throw new Error('Not signed in');
+  const teacherId = await requireUserId();
 
   const file = photoFile(studentId);
   if (!file.exists) throw new Error('No photo on this device');
