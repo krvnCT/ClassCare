@@ -47,9 +47,15 @@ object BeamClient {
     /** This phone, so the teacher's tally counts it once however often it asks. */
     device: String,
     into: File,
+    /**
+     * The socket, as soon as there is one — so a cancel from the notification
+     * can close it and break the blocking read rather than wait it out.
+     */
+    onSocket: (Socket) -> Unit = {},
     onProgress: (index: Int, received: Long, size: Long) -> Unit,
   ): Delivery {
     val socket: Socket = connect(factory, host, port)
+    onSocket(socket)
     socket.use { sock ->
       sock.soTimeout = 30_000
       sock.tcpNoDelay = true
@@ -121,6 +127,10 @@ object BeamClient {
             throw CutOffException(label)
           }
           if (size < 0 || size > Wire.MAX_FILE) throw IOException("Bad file size $size")
+          // Said at the start of each file as well as during it, so a screen
+          // waiting on "connecting" moves on the moment bytes begin — on a
+          // small file the first report would otherwise be its last.
+          onProgress(index, 0L, size)
 
           val target = unique(into, safeName(names[index], index))
           val partial = File(target.parentFile, "${target.name}.part")

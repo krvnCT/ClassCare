@@ -136,6 +136,29 @@ class LocalNet(context: Context) {
   }
 
   /**
+   * A Wi-Fi network already holding an address beside [host], if there is one.
+   *
+   * That is a student who joined the teacher's network by hand — from the
+   * "join it yourself" fallback, or before they scanned at all. Joining again
+   * would at best waste the seconds and at worst knock them off it, so the
+   * receive goes straight to the socket over the network they are on.
+   */
+  fun wifiNetworkOn(host: String): Network? {
+    val subnet = host.substringBeforeLast('.', "")
+    if (subnet.isEmpty()) return null
+    val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+      ?: return null
+    @Suppress("DEPRECATION")
+    return cm.allNetworks.firstOrNull { network ->
+      cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+        cm.getLinkProperties(network)?.linkAddresses?.any {
+          val a = it.address
+          a is Inet4Address && a.hostAddress?.startsWith("$subnet.") == true
+        } == true
+    }
+  }
+
+  /**
    * The Wi-Fi network this phone is joined to, if any.
    *
    * Asked of `ConnectivityManager` rather than guessed from interface names,

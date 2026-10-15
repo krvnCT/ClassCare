@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The transfer's notification icon: two arrows passing each other.
+
+  Monochrome on purpose — Android draws a small notification icon from its
+  alpha channel alone, so the app's colourful launcher icon would show as a
+  white square.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M16,3l4,4l-4,4v-3H4V6h12V3zM8,13v3h12v2H8v3l-4,-4L8,13z" />
+</vector>

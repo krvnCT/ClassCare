@@ -13,13 +13,18 @@
  * otherwise, and the Wi-Fi they are both on as a last resort. The teacher is
  * the one talking to the room, so they need the sentence that goes with it.
  *
- * ## Why the work happens here and not on the assignment screen
+ * ## Why the work starts here and not on the assignment screen
  *
- * Because the group only lives as long as this screen does, and the teacher
- * needs to see that. A phone quietly running an open access point after the
- * lesson ended is not something to leave to a stray `useEffect` somewhere else:
- * the thing that starts it is the thing on screen saying it is running, and the
- * back button is what stops it.
+ * Because the teacher needs to see that it is running. A phone quietly running
+ * an open access point after the lesson ended is not something to leave to a
+ * stray `useEffect` somewhere else: the thing that starts it is the thing on
+ * screen saying it is running, and leaving this screen — or Stop, here or on
+ * the notification — is what ends it.
+ *
+ * Leaving the *app* is not. Pressing Home to check the time used to freeze the
+ * transfer for every student mid-file, because Android freezes an app nobody is
+ * looking at. Sharing now runs in a foreground service with a notification, so
+ * the teacher can put the phone in a pocket and the class still gets the work.
  *
  * ## The live count
  *
@@ -28,15 +33,16 @@
  * up a code and has no idea whether thirty phones got the worksheet or none
  * did, and has to ask.
  */
-import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { confirm } from '@/components/Dialog';
 import { Icon } from '@/components/Icon';
 import { Screen, TopBar } from '@/components/layout';
 import { QrCode } from '@/components/QrCode';
-import { Button, Card, EmptyState, Overline } from '@/components/ui';
+import { Button, Card, EmptyState, Overline, Press } from '@/components/ui';
 import { useT } from '@/i18n/useT';
 import { formatBytes } from '@/lib/attachments';
 import { beamToken } from '@/lib/beam';
@@ -46,7 +52,9 @@ import {
   BeamNotPermitted,
   BeamSettingOff,
   BeamTooBig,
+  type BeamNotifyText,
   type BeamRoute,
+  onBeamHostStopped,
   onBeamPeer,
   SETTINGS_INTENT,
   type SettingOff,
@@ -60,7 +68,7 @@ type Arg = { uri: string; name: string; mime: string; size: number };
 
 export default function HandoutScreen() {
   const t = useT();
-  const { color } = useTheme();
+  const { color, status } = useTheme();
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
 
@@ -137,6 +145,13 @@ export default function HandoutScreen() {
    * QR code, and neither could tell the other what had happened.
    */
   const [peerFailure, setPeerFailure] = useState<string | null>(null);
+  /**
+   * Sharing ended by Stop — here, or on the notification while the teacher was
+   * elsewhere. Holds the final count, which is what they come back to read.
+   */
+  const [stopped, setStopped] = useState<{ received: number } | null>(null);
+  /** The network written out, folded away until somebody needs it. */
+  const [showNetwork, setShowNetwork] = useState(false);
 
   /**
    * The count, in a ref as well as in state.
@@ -146,6 +161,9 @@ export default function HandoutScreen() {
    * effect was set up — zero. A ref reads what is true now.
    */
   const tally = useRef({ started: false, received: 0 });
+  /** Read by the leave guard, which is registered once. */
+  const busyNow = useRef(0);
+  busyNow.current = busyPeers;
 
   const assignment = useMemo(
     () => ({
@@ -157,6 +175,44 @@ export default function HandoutScreen() {
       f: files.map((f) => ({ n: f.name, m: f.mime, s: f.size })),
     }),
     [params.title, params.instructions, params.teacher, files, madeAt, t],
+  );
+
+  /**
+   * The notification's words. Native has no translations of its own, so they
+   * travel with the start call; the placeholders are filled in natively as
+   * students arrive.
+   */
+  const notify = useMemo<BeamNotifyText>(
+    () => ({
+      channel: t('beam.notify.channel'),
+      channelResult: t('beam.notify.channelResult'),
+      title: t('beam.notify.title'),
+      waiting: t('beam.notify.waiting'),
+      received: t('beam.notify.received'),
+      receiving: t('beam.notify.receiving'),
+      stop: t('beam.notify.stop'),
+    }),
+    [t],
+  );
+
+  /**
+   * Written down as soon as the code is up, and again with the count when
+   * sharing ends. A teacher who shares a worksheet and closes the app without
+   * waiting still has a record that they shared it — which is the question
+   * the assignments tab is opened to answer.
+   */
+  const record = useCallback(
+    (received: number) =>
+      recordHandout({
+        id: handoutId,
+        title: assignment.t,
+        body: assignment.b,
+        sharedAt: madeAt * 1000,
+        // The uri too, so the history can hand the same files out again.
+        files: files.map((f) => ({ name: f.name, size: f.size, uri: f.uri, mime: f.mime })),
+        received,
+      }),
+    [handoutId, assignment, madeAt, files],
   );
 
   /* ------------------------------------------------------- Start and stop */
@@ -181,6 +237,8 @@ export default function HandoutScreen() {
         setReceived(0);
         setBusyPeers(0);
         setPeerFailure(null);
+        setStopped(null);
+        setPayload(null);
         tally.current = { started: false, received: 0 };
 
         const blocker = beamBlocker();
@@ -190,33 +248,14 @@ export default function HandoutScreen() {
           return;
         }
         try {
-          const started = await startBeam(assignment, files, token);
+          const started = await startBeam(assignment, files, token, notify);
           // The teacher left while Android was bringing the group up. Take it
           // straight back down — the cleanup below already ran.
           if (cancelled) {
             void stopBeam();
             return;
           }
-          /*
-            Written down as soon as the code is up, and again on the way out
-            with the count. A teacher who shares a worksheet and closes the app
-            without waiting still has a record that they shared it — which is
-            the question the assignments tab is opened to answer.
-          */
-          recordHandout({
-            id: handoutId,
-            title: assignment.t,
-            body: assignment.b,
-            sharedAt: madeAt * 1000,
-            // The uri too, so the history can hand the same files out again.
-            files: files.map((f) => ({
-              name: f.name,
-              size: f.size,
-              uri: f.uri,
-              mime: f.mime,
-            })),
-            received: 0,
-          });
+          record(0);
           tally.current = { started: true, received: 0 };
           setRoute(started.route);
           setNetwork(started.ssid ? { ssid: started.ssid, passphrase: started.passphrase } : null);
@@ -248,26 +287,82 @@ export default function HandoutScreen() {
         // The tally as it finally stood. Nothing arrives later to correct it —
         // there is no server to hear from — so this is the last chance to
         // record how many phones took the handout.
-        if (tally.current.started) {
-          recordHandout({
-            id: handoutId,
-            title: assignment.t,
-            body: assignment.b,
-            sharedAt: madeAt * 1000,
-            files: files.map((f) => ({
-              name: f.name,
-              size: f.size,
-              uri: f.uri,
-              mime: f.mime,
-            })),
-            received: tally.current.received,
-          });
-        }
+        if (tally.current.started) record(tally.current.received);
         // Unconditional. Leaving this screen must take the access point down
         // whether it came up cleanly, failed halfway, or is still starting.
         void stopBeam();
       };
-    }, [assignment, files, token, t, attempt]),
+    }, [assignment, files, token, t, attempt, notify, record]),
+  );
+
+  /**
+   * Stop, from the button here.
+   *
+   * Asked first only when somebody is mid-file: stopping then cuts them off,
+   * and a teacher tapping Stop as the bell goes may not have seen the two
+   * phones still pulling. With nobody receiving it just stops.
+   */
+  const stopNow = async () => {
+    if (busyNow.current > 0) {
+      const ok = await confirm({
+        title: t('beam.stopAsk'),
+        message: t('beam.stopAskBusy', { count: busyNow.current }),
+        confirmLabel: t('beam.stop'),
+        cancelLabel: t('beam.keepSharing'),
+      });
+      if (!ok) return;
+    }
+    await stopBeam();
+    record(tally.current.received);
+    setStopped({ received: tally.current.received });
+    setPayload(null);
+    setBusyPeers(0);
+  };
+
+  /*
+    The same question on the way out of the screen.
+
+    Leaving stops sharing — that is how the teacher ends it — so leaving while
+    a student is halfway through a file deserves the same "are you sure" the
+    Stop button gets. Leaving the *app* is a different thing and asks nothing:
+    sharing carries on in the background.
+  */
+  const navigation = useNavigation();
+  const leaving = useRef(false);
+  useEffect(
+    () =>
+      navigation.addListener('beforeRemove', (e) => {
+        if (leaving.current || busyNow.current === 0) return;
+        e.preventDefault();
+        void confirm({
+          title: t('beam.stopAsk'),
+          message: t('beam.stopAskBusy', { count: busyNow.current }),
+          confirmLabel: t('beam.stop'),
+          cancelLabel: t('beam.keepSharing'),
+        }).then((ok) => {
+          if (!ok) return;
+          leaving.current = true;
+          navigation.dispatch(e.data.action);
+        });
+      }),
+    [navigation, t],
+  );
+
+  /*
+    Stop pressed on the notification, with this screen in the background. The
+    code it is showing no longer leads anywhere, so it goes, and the count
+    stays for the teacher to read when they come back.
+  */
+  useEffect(
+    () =>
+      onBeamHostStopped(({ received: final }) => {
+        const count = Math.max(final, tally.current.received);
+        record(count);
+        setStopped({ received: count });
+        setPayload(null);
+        setBusyPeers(0);
+      }),
+    [record],
   );
 
   /* --------------------------------------------------- Students arriving */
@@ -328,6 +423,26 @@ export default function HandoutScreen() {
     );
   }
 
+  if (stopped) {
+    return (
+      <Screen>
+        <TopBar title={t('beam.title')} dismiss />
+        <View style={styles.stoppedWrap}>
+          <View style={[styles.stoppedBadge, { backgroundColor: color.primaryTint }]}>
+            <Icon name="check" size={26} color={color.primary} />
+          </View>
+          <Text style={styles.stoppedTitle}>{t('beam.stopped')}</Text>
+          <Text style={styles.stoppedHint}>
+            {t('beam.stoppedHint', { count: stopped.received })}
+          </Text>
+        </View>
+        <View style={styles.rescue}>
+          <Button label={t('beam.shareAgain')} icon="qr" onPress={() => setAttempt((n) => n + 1)} />
+        </View>
+      </Screen>
+    );
+  }
+
   return (
     <Screen>
       <TopBar title={t('beam.title')} dismiss />
@@ -336,10 +451,31 @@ export default function HandoutScreen() {
         contentContainerStyle={{ padding: space.gutter, paddingBottom: insets.bottom + 32 }}
         showsVerticalScrollIndicator={false}>
         {/*
-          The code first and large. Everything else here is for the teacher;
-          this part is for a camera three metres away, and it gets the width of
-          the screen because scannability is a function of how big each module
-          lands on the sensor.
+          Whether it is live, before anything else. A teacher glancing down
+          mid-sentence needs one word: is this thing working.
+        */}
+        <View style={styles.statusRow}>
+          {payload ? (
+            <View style={[styles.statusPill, { backgroundColor: status.present.tint }]}>
+              <View style={[styles.liveDot, { backgroundColor: color.success }]} />
+              <Text style={[styles.statusLabel, { color: color.successDeep }]}>
+                {t('beam.live')}
+              </Text>
+            </View>
+          ) : (
+            <View style={[styles.statusPill, { backgroundColor: color.fill }]}>
+              <ActivityIndicator size="small" color={color.mutedLight} />
+              <Text style={[styles.statusLabel, { color: color.mutedLight }]}>
+                {t('beam.starting')}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/*
+          The code large. Everything else here is for the teacher; this part is
+          for a camera three metres away, and scannability is a function of how
+          big each module lands on the sensor.
         */}
         <View style={styles.codeWrap}>
           {payload ? (
@@ -347,87 +483,108 @@ export default function HandoutScreen() {
           ) : (
             <View style={styles.starting}>
               <ActivityIndicator color={color.primary} />
-              <Text style={styles.startingLabel}>{t('beam.starting')}</Text>
             </View>
           )}
         </View>
 
-        <Text style={styles.scanHint}>{t('beam.scanHint')}</Text>
-
         {/*
-          What to tell the room, which is different for each route.
-
-          The teacher is the one talking; the app's job here is to give them
-          the sentence. On the direct route the students' phones join the group
-          by themselves and there is nothing to say; on the other two they have
-          to already be on the network, and a teacher who does not know that
-          finds out by watching nothing happen.
-        */}
-        {route ? (
-          <View style={styles.route}>
-            <Icon
-              name={route === 'direct' ? 'qr' : 'phone'}
-              size={15}
-              color={color.primary}
-            />
-            <Text style={styles.routeLabel}>{t(`beam.route.${route}`)}</Text>
-          </View>
-        ) : null}
-
-        {/*
-          The network written out, for the phone that cannot join on its own.
-
-          Below Android 10 no app may join a named network for the user, so the
-          student types it once in Settings. Shown to everyone rather than
-          detected, because the teacher is facing a room of mixed handsets and
-          cannot be asked to work out which of them is which.
-        */}
-        {network ? (
-          <Card style={styles.network}>
-            <Text style={styles.networkHint}>{t('beam.manualHint')}</Text>
-            <View style={styles.networkRow}>
-              <Text style={styles.networkKey}>{t('beam.networkName')}</Text>
-              <Text style={styles.networkValue} selectable>
-                {network.ssid}
-              </Text>
-            </View>
-            <View style={styles.networkRow}>
-              <Text style={styles.networkKey}>{t('beam.networkPassword')}</Text>
-              <Text style={styles.networkValue} selectable>
-                {network.passphrase}
-              </Text>
-            </View>
-          </Card>
-        ) : null}
-
-        {/*
-          The only feedback in the room that any of this worked. A teacher
-          holding up a code with no counter has to ask thirty people whether it
-          arrived.
+          The only feedback in the room that any of this worked. Two numbers,
+          big: who has it, and who is getting it right now.
         */}
         {payload ? (
-          <View style={styles.tally}>
-            <Icon name="check" size={15} color={color.successDeep} />
-            <Text style={styles.tallyLabel}>
-              {t('beam.received', { count: received })}
-              {busyPeers > 0 ? ` · ${t('beam.receiving', { count: busyPeers })}` : ''}
-            </Text>
+          <View style={styles.tallyRow}>
+            <View style={[styles.tallyCard, { backgroundColor: status.present.tint }]}>
+              <Icon name="check" size={16} color={color.successDeep} />
+              <Text style={[styles.tallyNumber, { color: color.successDeep }]}>{received}</Text>
+              <Text style={[styles.tallyCaption, { color: color.successDeep }]}>
+                {t('beam.gotIt')}
+              </Text>
+            </View>
+            <View style={[styles.tallyCard, { backgroundColor: color.primaryTint }]}>
+              {busyPeers > 0 ? (
+                <ActivityIndicator size="small" color={color.primaryInk} />
+              ) : (
+                <Icon name="refresh" size={16} color={color.primaryInk} />
+              )}
+              <Text style={[styles.tallyNumber, { color: color.primaryInk }]}>{busyPeers}</Text>
+              <Text style={[styles.tallyCaption, { color: color.primaryInk }]}>
+                {t('beam.inProgress')}
+              </Text>
+            </View>
           </View>
         ) : null}
 
         {/*
-          What went wrong for the student standing in front of them.
-
-          Shown on the teacher's screen because the teacher is the one who can
-          act on it: an out-of-date app on a student's phone, a file this phone
-          could not read, a code from last lesson. The student's screen says its
-          half; this is the other.
+          What went wrong for the student standing in front of them. The
+          teacher is the one who can act on it: an out-of-date app, a file this
+          phone could not read, a code from last lesson.
         */}
         {peerFailure ? (
           <View style={styles.peerFailure}>
             <Icon name="warning" size={15} color={color.dangerDeep} />
             <Text style={styles.peerFailureText}>{peerFailure}</Text>
           </View>
+        ) : null}
+
+        {/*
+          The sentence to say to the room, as three steps. On the direct route
+          the students' phones join by themselves, which is the third step; on
+          the other two they have to be on the network already, which the route
+          note underneath says.
+        */}
+        <Card style={styles.steps}>
+          <Overline style={{ marginBottom: 10 }}>{t('beam.stepsTitle')}</Overline>
+          {[t('beam.step1'), t('beam.step2'), t(route === 'direct' ? 'beam.step3' : 'beam.step3Same')].map(
+            (line, i) => (
+              <View key={i} style={styles.stepRow}>
+                <View style={[styles.stepNumber, { backgroundColor: color.primaryTint }]}>
+                  <Text style={[styles.stepNumberLabel, { color: color.primaryInk }]}>{i + 1}</Text>
+                </View>
+                <Text style={styles.stepText}>{line}</Text>
+              </View>
+            ),
+          )}
+          {route && route !== 'direct' ? (
+            <Text style={styles.routeLabel}>{t(`beam.route.${route}`)}</Text>
+          ) : null}
+        </Card>
+
+        {/*
+          The network written out, folded away. Students' phones join on their
+          own now; this is for the one phone in thirty that will not, and a
+          password printed under the code by default read as an instruction to
+          type it.
+        */}
+        {network ? (
+          <>
+            <Press onPress={() => setShowNetwork((v) => !v)} style={styles.networkToggle}>
+              <Icon name="info" size={14} color={color.mutedLight} />
+              <Text style={styles.networkToggleLabel}>{t('beam.cantConnect')}</Text>
+              <Icon
+                name="disclosure"
+                size={14}
+                color={color.mutedLight}
+                style={{ transform: [{ rotate: showNetwork ? '90deg' : '0deg' }] }}
+              />
+            </Press>
+            {showNetwork ? (
+              <Card style={styles.network}>
+                <Text style={styles.networkHint}>{t('beam.manualHint')}</Text>
+                <View style={styles.networkRow}>
+                  <Text style={styles.networkKey}>{t('beam.networkName')}</Text>
+                  <Text style={styles.networkValue} selectable>
+                    {network.ssid}
+                  </Text>
+                </View>
+                <View style={styles.networkRow}>
+                  <Text style={styles.networkKey}>{t('beam.networkPassword')}</Text>
+                  <Text style={styles.networkValue} selectable>
+                    {network.passphrase}
+                  </Text>
+                </View>
+              </Card>
+            ) : null}
+          </>
         ) : null}
 
         <Card style={styles.details}>
@@ -462,10 +619,23 @@ export default function HandoutScreen() {
         )}
 
         {/*
-          Said out loud, because "leave this screen open" is a requirement the
-          teacher cannot guess and will otherwise break by tabbing away.
+          Said out loud, because a teacher who learned "keep this screen open"
+          from the last version will otherwise stand there holding the phone.
         */}
-        <Text style={styles.note}>{t('beam.keepOpen')}</Text>
+        <View style={styles.backgroundNote}>
+          <Icon name="bell" size={15} color={color.mutedLight} />
+          <Text style={styles.note}>{t('beam.background')}</Text>
+        </View>
+
+        {payload ? (
+          <Button
+            label={t('beam.stop')}
+            icon="close"
+            variant="outline"
+            onPress={() => void stopNow()}
+            style={{ marginTop: 14 }}
+          />
+        ) : null}
       </ScrollView>
     </Screen>
   );
@@ -483,34 +653,77 @@ const makeStyles = ({ accents, color }: Theme) =>
       paddingHorizontal: space.gutter,
       paddingBottom: 14,
     },
+    statusRow: { alignItems: 'center', marginBottom: 12 },
+    statusPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingHorizontal: 12,
+      height: 30,
+      borderRadius: 15,
+    },
+    liveDot: { width: 8, height: 8, borderRadius: 4 },
+    statusLabel: { fontFamily: body[700], fontSize: 12.5 },
+
     codeWrap: { alignItems: 'center', paddingVertical: 4, minHeight: 300, justifyContent: 'center' },
     starting: { alignItems: 'center', gap: 14 },
-    startingLabel: { fontFamily: body[500], fontSize: 13, color: color.mutedLight },
-    scanHint: {
-      fontFamily: body[500],
-      fontSize: 13,
-      lineHeight: 19,
-      color: color.mutedLight,
-      textAlign: 'center',
-      marginTop: 14,
-    },
 
-    route: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      gap: 9,
-      marginTop: 12,
-      paddingHorizontal: 13,
-      paddingVertical: 11,
-      borderRadius: radius.control,
-      backgroundColor: color.primaryTint,
-    },
-    routeLabel: {
+    tallyRow: { flexDirection: 'row', gap: 10, marginTop: 16 },
+    tallyCard: {
       flex: 1,
-      fontFamily: body[500],
+      alignItems: 'center',
+      gap: 2,
+      paddingVertical: 12,
+      borderRadius: radius.control,
+    },
+    tallyNumber: { fontFamily: body[700], fontSize: 24, ...text.tabular },
+    tallyCaption: { fontFamily: body[600], fontSize: 12 },
+
+    steps: { padding: 16, marginTop: 16 },
+    stepRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6 },
+    stepNumber: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stepNumberLabel: { fontFamily: body[700], fontSize: 13 },
+    stepText: { flex: 1, fontFamily: body[500], fontSize: 14, lineHeight: 20, color: color.ink },
+    routeLabel: {
+      fontFamily: body[400],
       fontSize: 12.5,
       lineHeight: 18.5,
-      color: color.primaryInk,
+      color: color.mutedLight,
+      marginTop: 8,
+    },
+
+    networkToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      marginTop: 12,
+      paddingVertical: 8,
+    },
+    networkToggleLabel: { fontFamily: body[600], fontSize: 13, color: color.mutedLight },
+
+    stoppedWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 10 },
+    stoppedBadge: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 6,
+    },
+    stoppedTitle: { ...text.section, color: color.ink, textAlign: 'center' },
+    stoppedHint: {
+      fontFamily: body[400],
+      fontSize: 14,
+      lineHeight: 21,
+      color: color.mutedLight,
+      textAlign: 'center',
     },
 
     peerFailure: {
@@ -531,7 +744,7 @@ const makeStyles = ({ accents, color }: Theme) =>
       color: accents.rose.ink,
     },
 
-    network: { marginTop: 10, gap: 8, padding: 14 },
+    network: { marginTop: 4, gap: 8, padding: 14 },
     networkHint: {
       fontFamily: body[400],
       fontSize: 12,
@@ -576,12 +789,21 @@ const makeStyles = ({ accents, color }: Theme) =>
     fileName: { fontFamily: body[600], fontSize: 14, color: color.ink },
     fileMeta: { fontFamily: body[400], fontSize: 12, color: color.mutedLight, marginTop: 2 },
 
+    backgroundNote: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 9,
+      marginTop: 18,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+      borderRadius: radius.control,
+      backgroundColor: color.fill,
+    },
     note: {
+      flex: 1,
       fontFamily: body[400],
-      fontSize: 12,
-      lineHeight: 18,
-      color: color.mutedLight,
-      marginTop: 16,
-      textAlign: 'center',
+      fontSize: 12.5,
+      lineHeight: 18.5,
+      color: color.inkSoft,
     },
   });

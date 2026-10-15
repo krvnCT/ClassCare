@@ -12,7 +12,6 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
 import java.io.File
-import java.util.concurrent.Executors
 
 /**
  * Hand files from one phone to another with no internet, no router and no
@@ -34,6 +33,10 @@ import java.util.concurrent.Executors
  * which is to say it refused to work in the one situation where the class was
  * already connected to the teacher's phone.
  *
+ * The work itself belongs to [BeamSession], not to this module: a transfer has
+ * to outlive the screen that started it, and [BeamService] keeps it going while
+ * the app is in the background. This module starts things and listens.
+ *
  * No URL. No server anywhere. Nothing leaves the room. On a filtered connection
  * in Turkmenistan that is not a nice-to-have, it is the difference between a
  * feature that works in a classroom and one that does not.
@@ -48,8 +51,8 @@ import java.util.concurrent.Executors
  * ## What it deliberately does not do
  *
  * No resume, no encryption above WPA2, no discovery. The transfer is seconds
- * long over a link this fast, so a student who walks out of range simply scans
- * again. WPA2 with a password only the room can see off the teacher's screen is
+ * long over a link this fast, so a student who walks out of range simply taps
+ * "try again". WPA2 with a password only the room can see off the teacher's screen is
  * the same protection the room's own Wi-Fi would give, and the token stops a
  * stale code from a previous lesson pulling this one's files.
  */
@@ -57,23 +60,35 @@ class BeamModule : Module() {
   private val context: Context
     get() = appContext.reactContext ?: throw MissingContextException()
 
-  /**
-   * One thread, because a phone is either sending or receiving and never both,
-   * and because a socket read that blocks for thirty seconds must not be
-   * holding the queue Expo runs every other module's calls on.
-   */
-  private val work = Executors.newSingleThreadExecutor()
-
-  private var host: WifiDirectHost? = null
-  private var server: BeamServer? = null
-  private var join: WifiJoin? = null
+  /** What this instance put into [BeamSession.emit], so it only clears its own. */
+  private var emitter: ((String, Map<String, Any?>) -> Unit)? = null
 
   override fun definition() = ModuleDefinition {
     Name("Beam")
 
     // `peer` is the teacher watching students arrive; `progress` is the student
-    // watching a file land. A phone only ever emits one of the two.
-    Events("onBeamPeer", "onBeamProgress")
+    // watching a file land; `stage` is the student's phone finding the teacher's;
+    // `hostStopped` is the teacher pressing Stop on the notification.
+    Events("onBeamPeer", "onBeamProgress", "onBeamStage", "onBeamHostStopped")
+
+    OnCreate {
+      val send: (String, Map<String, Any?>) -> Unit = { name, body -> sendEvent(name, body) }
+      emitter = send
+      BeamSession.emit = send
+    }
+
+    /*
+      Not a stop. A transfer outlives the JavaScript that started it — that is
+      the point of [BeamSession] — so a module being torn down only stops
+      listening. The notification is how a transfer nobody is watching ends.
+    */
+    OnDestroy {
+      if (BeamSession.emit === emitter) BeamSession.emit = null
+      emitter = null
+    }
+
+    OnActivityEntersForeground { BeamSession.appVisible = true }
+    OnActivityEntersBackground { BeamSession.appVisible = false }
 
     Function("isAvailable") {
       context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
@@ -112,8 +127,20 @@ class BeamModule : Module() {
       if (routeNow() != null) null else WifiDirectHost(context).blocker() ?: "unsupported"
     }
 
-    /** False below Android 10: the student has to join the network by hand. */
-    Function("canJoinAutomatically") { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }
+    /**
+     * Whether this phone joins the teacher's network by itself.
+     *
+     * Always now: Android 10 and up join as a Wi-Fi Direct client or through
+     * the system dialog, and older versions save and join the network the way
+     * they still allow. Kept so an app built against the old answer still asks.
+     */
+    Function("canJoinAutomatically") { true }
+
+    /** The sharing in progress, if any — for a screen rebuilt mid-transfer. */
+    Function("hostStatus") { BeamSession.hostStatus() }
+
+    /** The receive in progress, if any — for a screen rebuilt mid-transfer. */
+    Function("receiveStatus") { BeamSession.receiveStatus() }
 
     /**
      * Whether Wi-Fi is switched on.
@@ -194,197 +221,71 @@ class BeamModule : Module() {
       Permissions.askForPermissionsWithPermissionsManager(appContext.permissions, promise, *needed())
     }
 
+    /**
+     * Permission to show the transfer's notification, on Android 13 and up.
+     *
+     * The transfer runs without it — the service does not depend on it — but
+     * nobody would see it running, or be able to stop it, once they left the
+     * app. Asked when a transfer starts and never required.
+     */
+    AsyncFunction("requestNotificationsAsync") { promise: Promise ->
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Permissions.askForPermissionsWithPermissionsManager(
+          appContext.permissions,
+          promise,
+          Manifest.permission.POST_NOTIFICATIONS,
+        )
+      } else {
+        promise.resolve(mapOf("granted" to true, "canAskAgain" to true, "status" to "granted"))
+      }
+    }
+
     /* ------------------------------------------------------------- Sending */
 
-    AsyncFunction("startHostAsync") { manifest: String, files: List<FileArg>, token: String, promise: Promise ->
-      stopHost()
-
-      val outgoing = files.map { Outgoing(it.uri, it.name, it.mime) }
-      val net = LocalNet(context)
-
-      // 1. The hotspot. Nothing to bring up, nothing to ask for, and the class
-      //    is already on it.
-      val hotspot = net.hotspot()
-      if (hotspot != null) {
-        serve(manifest, outgoing, token, null, null, hotspot.address, "hotspot", promise)
-        return@AsyncFunction
-      }
-
-      // 2. A group of our own — unless something stops it, in which case fall
-      //    to the joined Wi-Fi before reporting a failure. A room with working
-      //    Wi-Fi does not need to hear about Location Services.
-      val directHost = WifiDirectHost(context).also { host = it }
-      val blocked = directHost.blocker()
-      if (blocked != null) {
-        val lan = net.lan()
-        if (lan != null) {
-          host = null
-          serve(manifest, outgoing, token, null, null, lan.address, "lan", promise)
-          return@AsyncFunction
-        }
-        when (blocked) {
-          "wifiOff" -> throw BeamWifiOffException()
-          "locationOff" -> throw BeamLocationOffException()
-          else -> throw BeamUnavailableException()
-        }
-      }
-
-      directHost.start(GROUP_TIMEOUT_MS) { result ->
+    AsyncFunction("startHostAsync") {
+      manifest: String, files: List<FileArg>, token: String, notify: NotifyText?, promise: Promise ->
+      val title = runCatching { org.json.JSONObject(manifest).optString("t") }.getOrDefault("")
+      BeamSession.startSharing(
+        context = context,
+        manifest = manifest,
+        files = files.map { Outgoing(it.uri, it.name, it.mime) },
+        token = token,
+        title = title,
+        text = notify ?: NotifyText(),
+      ) { result ->
         result.fold(
-          onSuccess = { group ->
-            serve(
-              manifest, outgoing, token,
-              group.ssid, group.passphrase, group.host, "direct", promise,
-            )
-          },
-          onFailure = { failure ->
-            /*
-              The group did not come up. Before reporting that, look again for
-              a network that already exists — the state of the phone can have
-              changed in the thirty seconds we spent waiting, and a teacher who
-              switched their hotspot on while watching the spinner should get a
-              transfer rather than the error they were trying to fix.
-            */
-            val fallback = net.existing()
-            if (fallback == null) {
-              stopHost()
-              promise.reject(failure.asCoded())
-              return@fold
-            }
-            host?.stop()
-            host = null
-            val route = if (fallback.route == Route.HOTSPOT) "hotspot" else "lan"
-            serve(manifest, outgoing, token, null, null, fallback.address, route, promise)
-          },
+          onSuccess = { promise.resolve(it) },
+          onFailure = { promise.reject(it.asCoded()) },
         )
       }
     }
 
-    AsyncFunction("stopHostAsync") { stopHost() }
+    AsyncFunction("stopHostAsync") { BeamSession.stopSharing(context, byUser = false) }
 
     /* ----------------------------------------------------------- Receiving */
 
     AsyncFunction("receiveAsync") { options: ReceiveOptions, promise: Promise ->
-      releaseJoin()
-      val joiner = WifiJoin(context).also { join = it }
-
-      // No network name in the payload means the student is already on the
-      // right network — either they joined by hand on an old phone, or teacher
-      // and student happen to share a working LAN. Skip straight to the socket.
-      val ssid = options.ssid
-      if (ssid.isNullOrEmpty()) {
-        /*
-          Already on the right network — but say which one.
-
-          A plain socket goes over whatever Android calls the default network,
-          and a phone with mobile data keeps that as the default whenever the
-          Wi-Fi it is on has no internet. Both of the routes that land here —
-          the teacher's hotspot and a shared classroom network — look exactly
-          like that, so the teacher's address went out the cellular interface
-          and failed instantly as unreachable.
-        */
-        pull(LocalNet(context).wifiNetwork()?.socketFactory, options, promise)
-        return@AsyncFunction
-      }
-
-      joiner.join(ssid, options.passphrase.orEmpty(), JOIN_TIMEOUT_MS) { result ->
-        val network = result.getOrElse {
-          releaseJoin()
-          promise.reject(it.asCoded())
-          return@join
-        }
-        pull(network.socketFactory, options, promise)
-      }
-    }
-
-    AsyncFunction("cancelReceiveAsync") { releaseJoin() }
-
-    OnDestroy {
-      stopHost()
-      releaseJoin()
-      work.shutdownNow()
-    }
-  }
-
-  private fun pull(
-    factory: javax.net.SocketFactory?,
-    options: ReceiveOptions,
-    promise: Promise,
-  ) {
-    work.execute {
-      try {
-        val delivery = BeamClient.fetch(
-          factory = factory,
-          host = options.host,
-          port = options.port,
-          token = options.token,
-          device = deviceId(),
-          into = localDir(options.directory),
-        ) { index, received, size ->
-          sendEvent(
-            "onBeamProgress",
-            mapOf("file" to index, "received" to received, "size" to size),
-          )
-        }
-        promise.resolve(
-          mapOf(
-            "manifest" to delivery.manifest,
-            "files" to delivery.files.map {
-              mapOf("path" to it.path, "name" to it.name, "size" to it.size)
-            },
-          ),
+      // The directory as a path: `expo-file-system` hands back `file://` URIs,
+      // which `java.io.File` would take as a relative path — see `localDir`.
+      options.directory = localDir(options.directory).path
+      BeamSession.receive(context, options, deviceId()) { result ->
+        result.fold(
+          onSuccess = { delivery ->
+            promise.resolve(
+              mapOf(
+                "manifest" to delivery.manifest,
+                "files" to delivery.files.map {
+                  mapOf("path" to it.path, "name" to it.name, "size" to it.size)
+                },
+              ),
+            )
+          },
+          onFailure = { promise.reject(it.asCoded()) },
         )
-      } catch (e: Exception) {
-        promise.reject(e.asCoded())
-      } finally {
-        // Leave the group either way. Staying on a network with no internet is
-        // how a student ends up thinking their phone is broken.
-        releaseJoin()
       }
     }
-  }
 
-  /**
-   * Bind the socket and answer the promise.
-   *
-   * Shared by all three routes, because from here down they are the same thing:
-   * a server on a port, and a QR describing how to reach it. `ssid` and
-   * `passphrase` are only present on the Direct route — on the other two the
-   * student is already on the network, or joins it the way they always do, and
-   * putting a password in the code for a network they are on would be noise.
-   */
-  private fun serve(
-    manifest: String,
-    files: List<Outgoing>,
-    token: String,
-    ssid: String?,
-    passphrase: String?,
-    address: String,
-    route: String,
-    promise: Promise,
-  ) {
-    try {
-      val beam = BeamServer(
-        resolver = context.contentResolver,
-        manifest = manifest,
-        files = files,
-        token = token,
-      ) { event -> sendEvent("onBeamPeer", event) }
-      server = beam
-      val port = beam.start()
-      promise.resolve(
-        mapOf(
-          "ssid" to (ssid ?: ""),
-          "passphrase" to (passphrase ?: ""),
-          "host" to address,
-          "port" to port,
-          "route" to route,
-        ),
-      )
-    } catch (e: Exception) {
-      stopHost()
-      promise.reject(e.asCoded())
-    }
+    AsyncFunction("cancelReceiveAsync") { BeamSession.cancelReceive() }
   }
 
   /** See `Function("route")` — the ladder, asked without starting anything. */
@@ -433,18 +334,6 @@ class BeamModule : Module() {
     return fresh
   }
 
-  private fun stopHost() {
-    server?.stop()
-    server = null
-    host?.stop()
-    host = null
-  }
-
-  private fun releaseJoin() {
-    join?.release()
-    join = null
-  }
-
   /**
    * Wi-Fi Direct used to be gated behind location, because a scan reveals where
    * you are. From Android 13 that job belongs to NEARBY_WIFI_DEVICES, which is
@@ -472,22 +361,12 @@ class BeamModule : Module() {
     is CorruptFileException -> BeamCorruptException(message ?: "")
     is CutOffException -> BeamCutOffException(where)
     is VersionMismatchException -> BeamVersionException()
+    is UnreachableException -> BeamUnreachableException()
     else -> BeamFailedException(message ?: javaClass.simpleName)
   }
 
   companion object {
-    /**
-     * Bringing a group up is a few seconds on a good phone and slow on a bad
-     * one. Generous, because the preflight in `blocker()` now catches the cases
-     * that were never going to succeed however long they were given.
-     */
-    private const val GROUP_TIMEOUT_MS = 30_000L
-
-    /** Includes the student tapping "Connect" in the system dialog. */
-    private const val JOIN_TIMEOUT_MS = 45_000
-
     private const val DEVICE_KEY = "device"
-
   }
 }
 
@@ -507,6 +386,13 @@ class ReceiveOptions : Record {
   @Field var port: Int = 0
   @Field var token: String = ""
   @Field var directory: String = ""
+  /** The handout's title, for the notification. */
+  @Field var title: String = ""
+  /** Each file's size from the code, so the notification can show one bar for all of them. */
+  @Field var sizes: List<Double> = emptyList()
+  @Field var notify: NotifyText? = null
+  /** Opened by tapping "received" when the app was not on screen. */
+  @Field var openUrl: String? = null
 }
 
 class MissingContextException :
@@ -590,6 +476,16 @@ class BeamVersionException : CodedException(
 class BeamManualJoinException : CodedException(
   "ERR_BEAM_JOIN_MANUAL",
   "This phone is too old to join a network on its own.",
+  null,
+)
+
+/**
+ * Joined, or already on the network, and nothing answered at the teacher's
+ * address — their sharing screen closed, or this phone is not on their network.
+ */
+class BeamUnreachableException : CodedException(
+  "ERR_BEAM_UNREACHABLE",
+  "The teacher's phone did not answer.",
   null,
 )
 

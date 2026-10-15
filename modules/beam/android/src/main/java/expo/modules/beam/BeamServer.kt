@@ -120,6 +120,9 @@ class BeamServer(
 
   private fun serve(client: Socket) {
     val who = client.inetAddress?.hostAddress ?: "?"
+    // Whether this phone was counted as receiving, so a failure knows whether
+    // to count it back out. A handshake that fails was never "receiving".
+    var begun = false
     try {
       client.use { sock ->
         // A student who walks out of range mid-transfer must not hold a worker
@@ -173,6 +176,7 @@ class BeamServer(
           as a transfer that stopped — with the file's name on it.
         */
         out.flush()
+        begun = true
         onEvent(mapOf("kind" to "started", "peer" to who))
 
         files.forEachIndexed { index, file -> sendOne(out, file, index, who) }
@@ -193,6 +197,7 @@ class BeamServer(
           // `SecurityException` reads as "this phone could not open the file",
           // and its message alone does not say so.
           "message" to listOfNotNull(e.javaClass.simpleName, e.message).joinToString(": "),
+          "begun" to begun,
         ),
       )
     }

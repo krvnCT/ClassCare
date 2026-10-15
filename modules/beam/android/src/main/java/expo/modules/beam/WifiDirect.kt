@@ -345,7 +345,7 @@ class WifiDirectHost(context: Context) {
  * third-party apps. Rather than pretend, this reports `manual`, and the app
  * shows the student the name and password to type in Settings once.
  */
-class WifiJoin(context: Context) {
+class WifiJoin(context: Context) : Joiner {
   private val app = context.applicationContext
   private val connectivity =
     app.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -430,7 +430,7 @@ class WifiJoin(context: Context) {
   }
 
   /** Leave the group. Without this the student stays off the internet. */
-  fun release() {
+  override fun release() {
     callback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
     callback = null
   }

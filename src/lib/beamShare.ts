@@ -38,10 +38,16 @@
 import { Platform } from 'react-native';
 
 import Beam from '../../modules/beam/src/BeamModule';
-import type { BeamPeerEvent, BeamProgressEvent, BeamRoute } from '../../modules/beam/src/Beam.types';
+import type {
+  BeamHostStatus,
+  BeamNotifyText,
+  BeamPeerEvent,
+  BeamProgressEvent,
+  BeamRoute,
+} from '../../modules/beam/src/Beam.types';
 import { beamManifest, encodeBeam, MAX_PAYLOAD_BYTES, type BeamAssignment, type BeamPayload } from '@/lib/beam';
 
-export type { BeamPeerEvent, BeamProgressEvent, BeamRoute };
+export type { BeamHostStatus, BeamNotifyText, BeamPeerEvent, BeamProgressEvent, BeamRoute };
 
 /** A file to hand over, as the picker described it. */
 export type BeamOutgoing = { uri: string; name: string; mime: string; size: number };
@@ -151,6 +157,8 @@ export async function startBeam(
   assignment: BeamAssignment,
   files: BeamOutgoing[],
   token: string,
+  /** The notification's words, in the teacher's language. */
+  notify: BeamNotifyText,
 ): Promise<{ payload: string; ssid: string; passphrase: string; route: BeamRoute }> {
   if (!Beam) throw new Error('Beam is not available in this build');
 
@@ -175,10 +183,19 @@ export async function startBeam(
     if (!permission.granted) throw new BeamNotPermitted();
   }
 
+  /*
+    Asked, never required. Sharing keeps running when the teacher leaves the
+    app, and on Android 13 and up the notification that says so — and holds
+    the Stop button — is only shown with this. Refusing it costs the teacher
+    the notification, not the transfer.
+  */
+  await Beam.requestNotificationsAsync?.().catch(() => null);
+
   const group = await Beam.startHostAsync(
     beamManifest(assignment),
     files.map((f) => ({ uri: f.uri, name: f.name, mime: f.mime })),
     token,
+    notify,
   );
 
   const full: BeamPayload = {
@@ -233,6 +250,21 @@ export function onBeamPeer(handler: (event: BeamPeerEvent) => void): () => void 
   const sub = Beam.addListener('onBeamPeer', handler);
   return () => sub.remove();
 }
+
+/**
+ * Hear about the teacher pressing Stop on the notification.
+ *
+ * The screen did not ask for that, so without this it would go on holding up
+ * a code nothing answers. Returns the unsubscribe.
+ */
+export function onBeamHostStopped(handler: (event: { received: number }) => void): () => void {
+  if (!Beam?.hostStatus) return () => {};
+  const sub = Beam.addListener('onBeamHostStopped', handler);
+  return () => sub.remove();
+}
+
+/** The share still running in the background, or null. */
+export const beamHostStatus = (): BeamHostStatus | null => Beam?.hostStatus?.() ?? null;
 
 /* -------------------------------------------------------------------------- */
 /* The receiving half — for StudentCare                                       */

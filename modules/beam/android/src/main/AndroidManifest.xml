@@ -28,8 +28,29 @@
     android:maxSdkVersion="32" />
 
   <!--
+    Keeping a transfer going while the app is in the background — see
+    BeamService. `connectedDevice` because that is what this is: a link to a
+    phone in the same room. Its prerequisite on Android 14 is CHANGE_WIFI_STATE,
+    declared above. POST_NOTIFICATIONS so the progress and the Stop button are
+    visible on Android 13 and up; WAKE_LOCK so a screen going off does not stall
+    the radio mid-file.
+  -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <!--
     Not required: the app must still install on a tablet with no Wi-Fi Direct
     radio. `isAvailable()` reports false there and the UI hides the button.
   -->
   <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+
+  <application>
+    <service
+      android:name="expo.modules.beam.BeamService"
+      android:exported="false"
+      android:foregroundServiceType="connectedDevice"
+      android:stopWithTask="false" />
+  </application>
 </manifest>
